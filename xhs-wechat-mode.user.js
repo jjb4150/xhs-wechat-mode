@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.2.0
+// @version      0.2.1
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -1239,6 +1239,7 @@
     state.activeNote = note;
     markNoteSeen(note);
     updateListItemState(note); // 增量更新高亮与未读点，不重建列表
+    resetCommentPaging();      // 重置评论分批状态
     const rootEl = ensureRoot();
     const composer = rootEl.querySelector("#wx-composer");
     const titleEl = rootEl.querySelector("#wx-detail-title");
@@ -1342,6 +1343,101 @@
     } catch (e) {
       return null;
     }
+  }
+
+  /* ============================== 评论分批加载 ============================== */
+
+  // 统计 iframe 中当前已渲染的一级评论数
+  function countFrameComments(doc) {
+    const box = doc.querySelector(".comments-container");
+    if (!box) return 0;
+    return [...box.querySelectorAll(".comment-item")].filter(
+      (el) => !el.parentElement.closest(".comment-item") && !el.closest(".reply-container")
+    ).length;
+  }
+
+  // 驱动 iframe 内部滚动触发小红书评论翻页，等待新评论渲染。返回本轮新增一级评论数
+  async function loadMoreComments(doc) {
+    const before = countFrameComments(doc);
+    // 多管齐下：滚动评论容器（多种候选）+ 滚动 iframe 页面
+    try {
+      for (const sel of [".note-scroller", ".comments-el", ".comments-container"]) {
+        for (const el of doc.querySelectorAll(sel)) {
+          try { el.scrollTop = el.scrollHeight; } catch (e) { /* 忽略 */ }
+        }
+      }
+      const win = doc.defaultView;
+      if (win) {
+        try {
+          win.scrollTo(0, win.document.documentElement.scrollHeight);
+        } catch (e) { /* 忽略 */ }
+      }
+    } catch (e) { /* 忽略 */ }
+    // 轮询等待新评论出现（最多 3.5s）
+    for (let i = 0; i < 12; i++) {
+      await sleep(300);
+      const now = countFrameComments(doc);
+      if (now > before) {
+        await sleep(400); // 再等一小会儿让本批渲染完整
+        return countFrameComments(doc) - before;
+      }
+    }
+    return 0;
+  }
+
+  // 详情区滚动到底时自动加载下一页评论
+  let commentsLoadingMore = false;
+  let commentsNoMore = false;
+  async function maybeLoadMoreComments() {
+    const note = state.activeNote;
+    const detail = state.activeDetail;
+    if (!note || !detail || commentsLoadingMore || commentsNoMore) return;
+    if (!detail.comments || detail.commentError) return;
+    const frame = document.getElementById("xhs-wx-engine");
+    const doc = frame && frame.contentDocument;
+    if (!doc || !doc.querySelector(".comments-container")) return;
+
+    commentsLoadingMore = true;
+    setMoreCommentsStatus("正在加载更多评论…");
+    try {
+      const added = await loadMoreComments(doc);
+      if (added > 0) {
+        const parsed = parseComments(doc);
+        detail.comments = parsed.comments;
+        detail.totalText = parsed.totalText;
+        renderCommentsInto();
+        cachePutDetail(note.noteId, detail);
+        setMoreCommentsStatus("");
+        log("评论分批：新增", added, "条，累计", detail.comments.length);
+      } else {
+        commentsNoMore = true;
+        setMoreCommentsStatus(detail.comments.length ? "评论已全部加载" : "");
+      }
+    } finally {
+      commentsLoadingMore = false;
+    }
+  }
+
+  // 评论区底部状态行
+  function setMoreCommentsStatus(text) {
+    const rootEl = ensureRoot();
+    const box = rootEl.querySelector("#wx-comments");
+    if (!box) return;
+    let el = box.querySelector("#wx-comments-status");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "wx-comments-status";
+      box.appendChild(el);
+    }
+    el.className = "wx-divider";
+    el.textContent = text;
+    if (!text) el.remove();
+  }
+
+  // 重置分批状态（打开新笔记时调用）
+  function resetCommentPaging() {
+    commentsLoadingMore = false;
+    commentsNoMore = false;
   }
 
   // 从 iframe 文档提取互动栏数据（数字与激活状态）
@@ -1470,10 +1566,12 @@
       parts.push(`<div class="wx-divider">评论加载中…</div>`);
     } else {
       const total = detail.totalText || `共 ${detail.comments.length} 条评论`;
-      parts.push(`<div class="wx-divider">${escapeHtml(total)}</div>`);
+      parts.push(`<div class="wx-divider">${escapeHtml(total)}${detail.totalText ? ` · 已加载 ${detail.comments.length} 条` : ""}</div>`);
       for (const c of detail.comments) parts.push(commentHtml(c));
       if (!detail.comments.length) {
         parts.push(`<div class="wx-divider">还没有评论，抢首评</div>`);
+      } else if (!commentsNoMore) {
+        parts.push(`<div class="wx-divider" id="wx-comments-status">↓ 下滑加载更多评论</div>`);
       }
     }
     box.innerHTML = parts.join("");
@@ -1498,6 +1596,16 @@
       const more = e.target.closest("[data-more]");
       if (more) expandReplies(more);
     });
+    // 滚动接近底部 -> 分批加载下一页评论
+    body.addEventListener(
+      "scroll",
+      () => {
+        if (body.scrollTop + body.clientHeight >= body.scrollHeight - 140) {
+          maybeLoadMoreComments();
+        }
+      },
+      { passive: true }
+    );
   }
 
   function updateInteractButtons() {
