@@ -1,0 +1,1533 @@
+// ==UserScript==
+// @name         小红书微信模式
+// @namespace    xhs-wechat-mode
+// @version      0.1.0
+// @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
+// @author       junbiaojin
+// @license      MIT
+// @match        https://www.xiaohongshu.com/*
+// @run-at       document-idle
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_registerMenuCommand
+// @noframes
+// ==/UserScript==
+
+/*
+ * 架构（改造自 Chiphell 微信模式脚本的 UI 思路，数据层针对小红书重写）：
+ * - 左栏会话列表 = 首页 feed 笔记流（扫描页面 .note-item DOM + MutationObserver）
+ * - 右栏气泡 = 笔记正文（fetch 笔记 URL 解析 __INITIAL_STATE__）+ 评论（隐藏 iframe 加载后读 DOM）
+ * - 点赞/收藏/发评论/展开楼中楼 = 驱动隐藏 iframe 里的真实页面控件（零签名、零风控）
+ */
+
+(() => {
+  "use strict";
+
+  const ROOT_ID = "xhs-wx-root";
+  const LOG_PREFIX = "[小红书微信模式]";
+  const STORE_KEYS = {
+    enabled: "xhsWxEnabled",
+    leftWidth: "xhsWxLeftWidth",
+    seenMap: "xhsWxSeenMap",
+    likedMap: "xhsWxLikedMap",
+    collectedMap: "xhsWxCollectedMap",
+  };
+
+  /* ============================== 工具 ============================== */
+
+  const log = (...args) => console.log(LOG_PREFIX, ...args);
+  const warn = (...args) => console.warn(LOG_PREFIX, ...args);
+
+  function storeGet(key, fallback) {
+    try {
+      const v = GM_getValue(key);
+      return v === undefined || v === null ? fallback : v;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function storeSet(key, value) {
+    try {
+      GM_setValue(key, value);
+    } catch (e) {
+      warn("存储失败", key, e);
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  // 8732 -> "8732"，12400 -> "1.2万"
+  function fmtCount(n) {
+    const num = Number(n);
+    if (!isFinite(num)) return String(n == null ? "" : n);
+    if (num >= 10000) {
+      const w = num / 10000;
+      return (w >= 10 ? Math.round(w) : Math.round(w * 10) / 10) + "万";
+    }
+    return String(num);
+  }
+
+  // 时间戳 -> "3分钟前 / 2天前 / 2025-06-01"
+  function fmtTime(ts) {
+    const t = Number(ts);
+    if (!isFinite(t) || t <= 0) return "";
+    const diff = Date.now() - t;
+    if (diff < 60 * 1000) return "刚刚";
+    if (diff < 3600 * 1000) return Math.floor(diff / 60000) + "分钟前";
+    if (diff < 86400 * 1000) return Math.floor(diff / 3600000) + "小时前";
+    if (diff < 86400 * 1000 * 30) return Math.floor(diff / 86400000) + "天前";
+    const d = new Date(t);
+    const now = new Date();
+    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return d.getFullYear() === now.getFullYear() ? ymd.slice(5) : ymd;
+  }
+
+  function uidFromProfileHref(href) {
+    const m = /\/user\/profile\/([0-9a-f]+)/i.exec(href || "");
+    return m ? m[1] : "";
+  }
+
+  function noteIdFromHref(href) {
+    const m = /\/(?:explore|discovery\/item)\/([0-9a-f]+)/i.exec(href || "");
+    return m ? m[1] : "";
+  }
+
+  /* ============================== 样式 ============================== */
+
+  const CSS = `
+#xhs-wx-root * { box-sizing: border-box; margin: 0; padding: 0; }
+#xhs-wx-root {
+  position: fixed; inset: 0; z-index: 2147483000;
+  display: flex; flex-direction: column;
+  background: #f2f2f2; color: #1a1a1a;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 14px; line-height: 1.5;
+}
+#xhs-wx-root button { font-family: inherit; cursor: pointer; border: none; background: none; }
+#xhs-wx-root img { display: block; }
+
+/* ---- 顶栏 ---- */
+#xhs-wx-root .wx-top {
+  height: 44px; flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 0 14px; background: #2e2e2e; color: #d9d9d9;
+}
+#xhs-wx-root .wx-brand { font-weight: 600; font-size: 15px; color: #fff; display: flex; align-items: center; gap: 8px; }
+#xhs-wx-root .wx-brand-dot { width: 8px; height: 8px; border-radius: 50%; background: #ff2442; }
+#xhs-wx-root .wx-top-btn {
+  width: 30px; height: 30px; border-radius: 6px; color: #bbb;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+#xhs-wx-root .wx-top-btn:hover { background: rgba(255,255,255,.12); color: #fff; }
+#xhs-wx-root .wx-top-tip { margin-left: auto; font-size: 12px; color: #8a8a8a; }
+
+/* ---- 主体三栏 ---- */
+#xhs-wx-root .wx-main { flex: 1; min-height: 0; display: flex; }
+
+/* ---- 导航栏 ---- */
+#xhs-wx-root .wx-navrail {
+  width: 56px; flex: none; background: #2a2a2a;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 12px 0;
+}
+#xhs-wx-root .wx-nav-avatar-wrap { margin-bottom: 8px; position: relative; cursor: pointer; }
+#xhs-wx-root .wx-nav-avatar {
+  width: 34px; height: 34px; border-radius: 8px; object-fit: cover; background: #444;
+}
+#xhs-wx-root .wx-nav-btn {
+  width: 40px; height: 40px; border-radius: 10px; color: #9a9a9a;
+  display: inline-flex; align-items: center; justify-content: center; position: relative;
+}
+#xhs-wx-root .wx-nav-btn:hover { color: #fff; }
+#xhs-wx-root .wx-nav-btn.active { background: rgba(255,255,255,.14); color: #fff; }
+#xhs-wx-root .wx-nav-spacer { flex: 1; }
+
+/* ---- 左栏会话列表 ---- */
+#xhs-wx-root .wx-aside {
+  width: 300px; min-width: 220px; max-width: 480px; flex: none;
+  background: #ffffff; border-right: 1px solid #e4e4e4;
+  display: flex; flex-direction: column; min-height: 0; position: relative;
+}
+#xhs-wx-root .wx-search { padding: 10px 12px; flex: none; }
+#xhs-wx-root .wx-search input {
+  width: 100%; height: 30px; border: none; border-radius: 6px;
+  background: #f2f2f2; padding: 0 12px; font-size: 13px; outline: none; color: #333;
+}
+#xhs-wx-root .wx-search input:focus { background: #ececec; }
+#xhs-wx-root .wx-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 16px; }
+#xhs-wx-root .wx-list::-webkit-scrollbar { width: 6px; }
+#xhs-wx-root .wx-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 3px; }
+
+#xhs-wx-root .wx-item {
+  display: flex; gap: 10px; padding: 10px; border-radius: 10px;
+  cursor: pointer; align-items: flex-start; position: relative;
+}
+#xhs-wx-root .wx-item:hover { background: #f5f5f5; }
+#xhs-wx-root .wx-item.active { background: #ececec; }
+#xhs-wx-root .wx-item-cover {
+  width: 58px; height: 58px; border-radius: 6px; object-fit: cover; flex: none;
+  background: #f0f0f0;
+}
+#xhs-wx-root .wx-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+#xhs-wx-root .wx-item-title {
+  font-size: 14px; color: #1a1a1a; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35;
+}
+#xhs-wx-root .wx-item-meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #999; }
+#xhs-wx-root .wx-item-meta .author { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#xhs-wx-root .wx-item-unread {
+  width: 8px; height: 8px; border-radius: 50%; background: #ff2442;
+  position: absolute; right: 14px; top: 16px;
+}
+#xhs-wx-root .wx-item-tag {
+  font-size: 11px; color: #ff2442; border: 1px solid currentColor;
+  border-radius: 3px; padding: 0 3px; line-height: 16px; flex: none;
+}
+#xhs-wx-root .wx-empty-list { text-align: center; color: #aaa; padding: 60px 20px; font-size: 13px; }
+#xhs-wx-root .wx-list-loading { text-align: center; color: #bbb; font-size: 12px; padding: 10px 0; }
+
+/* ---- 拖拽分隔 ---- */
+#xhs-wx-root .wx-resize-col { width: 4px; flex: none; cursor: col-resize; background: transparent; }
+#xhs-wx-root .wx-resize-col:hover, #xhs-wx-root .wx-resize-col.dragging { background: #07c160; }
+
+/* ---- 右栏详情 ---- */
+#xhs-wx-root .wx-detail {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  background: #f5f5f5; min-height: 0;
+}
+#xhs-wx-root .wx-detail-head {
+  height: 48px; flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 0 16px; background: #f5f5f5; border-bottom: 1px solid #e8e8e8;
+}
+#xhs-wx-root .wx-detail-title {
+  flex: 1; min-width: 0; font-size: 15px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#xhs-wx-root .wx-detail-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+#xhs-wx-root .wx-link-btn {
+  height: 30px; padding: 0 12px; border-radius: 6px; color: #555; font-size: 13px;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+#xhs-wx-root .wx-link-btn:hover { background: #eaeaea; }
+#xhs-wx-root .wx-link-btn.on { color: #ff2442; }
+
+#xhs-wx-root .wx-detail-body {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 16px 6% 20px;
+}
+#xhs-wx-root .wx-detail-body::-webkit-scrollbar { width: 8px; }
+#xhs-wx-root .wx-detail-body::-webkit-scrollbar-thumb { background: #ddd; border-radius: 4px; }
+
+#xhs-wx-root .wx-empty-detail {
+  height: 100%; display: flex; flex-direction: column; gap: 10px;
+  align-items: center; justify-content: center; color: #b3b3b3; font-size: 14px;
+}
+#xhs-wx-root .wx-empty-detail .icon { font-size: 40px; }
+#xhs-wx-root .wx-loading-detail { text-align: center; color: #999; padding: 80px 0; font-size: 13px; }
+
+/* ---- 气泡 ---- */
+#xhs-wx-root .wx-msg { display: flex; gap: 10px; margin-bottom: 18px; }
+#xhs-wx-root .wx-msg.me { flex-direction: row-reverse; }
+#xhs-wx-root .wx-avatar {
+  width: 38px; height: 38px; border-radius: 6px; object-fit: cover; flex: none; background: #e8e8e8;
+  cursor: pointer;
+}
+#xhs-wx-root .wx-msg-body { max-width: 62%; display: flex; flex-direction: column; gap: 4px; }
+#xhs-wx-root .wx-msg-name { font-size: 12px; color: #999; padding: 0 2px; }
+#xhs-wx-root .wx-msg.me .wx-msg-name { text-align: right; }
+#xhs-wx-root .wx-bubble {
+  background: #ffffff; border-radius: 4px 12px 12px 12px; padding: 10px 12px;
+  font-size: 14px; color: #1a1a1a; word-break: break-word; white-space: pre-wrap;
+  box-shadow: 0 1px 1px rgba(0,0,0,.04);
+}
+#xhs-wx-root .wx-msg.me .wx-bubble {
+  background: #95ec69; border-radius: 12px 4px 12px 12px;
+}
+#xhs-wx-root .wx-bubble a { color: #1668dc; text-decoration: none; }
+#xhs-wx-root .wx-bubble .wx-tag { color: #1668dc; }
+#xhs-wx-root .wx-bubble-meta { font-size: 12px; color: #aaa; padding: 0 2px; display: flex; gap: 8px; }
+#xhs-wx-root .wx-msg.me .wx-bubble-meta { justify-content: flex-end; }
+#xhs-wx-root .wx-badge {
+  display: inline-block; font-size: 11px; line-height: 16px; padding: 0 4px;
+  background: #ff2442; color: #fff; border-radius: 3px; margin-right: 6px;
+  vertical-align: 1px;
+}
+#xhs-wx-root .wx-bubble-imgs {
+  display: grid; gap: 4px; margin-top: 6px; max-width: 480px;
+}
+#xhs-wx-root .wx-bubble-imgs.n1 { grid-template-columns: minmax(0, 420px); }
+#xhs-wx-root .wx-bubble-imgs.n2, #xhs-wx-root .wx-bubble-imgs.n4 { grid-template-columns: repeat(2, minmax(0, 220px)); }
+#xhs-wx-root .wx-bubble-imgs.n3, #xhs-wx-root .wx-bubble-imgs.n5, #xhs-wx-root .wx-bubble-imgs.n6,
+#xhs-wx-root .wx-bubble-imgs.n7, #xhs-wx-root .wx-bubble-imgs.n8, #xhs-wx-root .wx-bubble-imgs.n9 { grid-template-columns: repeat(3, minmax(0, 155px)); }
+#xhs-wx-root .wx-bubble-imgs img {
+  width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 4px;
+  background: #ececec; cursor: zoom-in;
+}
+#xhs-wx-root .wx-bubble-imgs.n1 img { aspect-ratio: auto; max-height: 420px; object-fit: contain; background: #fafafa; }
+
+/* 楼中楼：在父气泡内缩进展示 */
+#xhs-wx-root .wx-subcomments { margin-top: 8px; border-left: 2px solid #ececec; padding-left: 10px; display: flex; flex-direction: column; gap: 8px; }
+#xhs-wx-root .wx-subcomment { font-size: 13px; }
+#xhs-wx-root .wx-subcomment .who { color: #576b95; margin-right: 4px; }
+#xhs-wx-root .wx-subcomment .who.author-tag { color: #ff2442; }
+#xhs-wx-root .wx-subcomment .sub-meta { color: #bbb; font-size: 11px; margin-top: 2px; }
+#xhs-wx-root .wx-expand-replies {
+  margin-top: 8px; font-size: 12px; color: #576b95; cursor: pointer; user-select: none;
+}
+#xhs-wx-root .wx-expand-replies:hover { opacity: .8; }
+
+/* 分隔提示 */
+#xhs-wx-root .wx-divider {
+  text-align: center; color: #b3b3b3; font-size: 12px; margin: 18px 0;
+}
+
+/* 互动栏（笔记气泡下方） */
+#xhs-wx-root .wx-interact {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 8px;
+  padding: 4px 10px; border-radius: 14px; background: rgba(0,0,0,.04);
+  font-size: 12px; color: #888; user-select: none;
+}
+#xhs-wx-root .wx-interact .act {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer; padding: 2px 6px; border-radius: 10px;
+}
+#xhs-wx-root .wx-interact .act:hover { background: rgba(0,0,0,.06); }
+#xhs-wx-root .wx-interact .act.on { color: #ff2442; }
+#xhs-wx-root .wx-interact .sep { color: #ddd; }
+
+/* ---- 底部输入 ---- */
+#xhs-wx-root .wx-composer { flex: none; padding: 10px 6% 14px; background: #f5f5f5; }
+#xhs-wx-root .wx-composer-inner {
+  background: #ffffff; border-radius: 10px; padding: 10px 12px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.05);
+}
+#xhs-wx-root .wx-input {
+  min-height: 44px; max-height: 140px; overflow-y: auto; outline: none;
+  font-size: 14px; color: #1a1a1a; word-break: break-word;
+}
+#xhs-wx-root .wx-input:empty::before {
+  content: attr(data-placeholder); color: #bbb;
+}
+#xhs-wx-root .wx-composer-bar { display: flex; align-items: center; margin-top: 8px; }
+#xhs-wx-root .wx-composer-tip { font-size: 12px; color: #aaa; flex: 1; }
+#xhs-wx-root .wx-send {
+  height: 30px; padding: 0 18px; border-radius: 6px; background: #07c160;
+  color: #fff; font-size: 13px; flex: none;
+}
+#xhs-wx-root .wx-send:disabled { background: #d2d2d2; cursor: default; }
+
+/* ---- 图片查看器 ---- */
+#xhs-wx-root .wx-viewer {
+  position: fixed; inset: 0; z-index: 2147483600; background: rgba(0,0,0,.9);
+  display: flex; align-items: center; justify-content: center;
+}
+#xhs-wx-root .wx-viewer img { max-width: 92vw; max-height: 88vh; object-fit: contain; transition: transform .12s; }
+#xhs-wx-root .wx-viewer-close {
+  position: absolute; top: 16px; right: 20px; color: #fff; font-size: 30px; line-height: 1;
+  cursor: pointer; opacity: .8;
+}
+#xhs-wx-root .wx-viewer-index { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); color: #ddd; font-size: 13px; }
+#xhs-wx-root .wx-viewer-arrow {
+  position: absolute; top: 50%; transform: translateY(-50%); color: #fff; font-size: 34px;
+  cursor: pointer; opacity: .6; user-select: none; padding: 10px;
+}
+#xhs-wx-root .wx-viewer-arrow:hover { opacity: 1; }
+#xhs-wx-root .wx-viewer-arrow.left { left: 12px; }
+#xhs-wx-root .wx-viewer-arrow.right { right: 12px; }
+
+/* ---- 设置面板 ---- */
+#xhs-wx-root .wx-settings { padding: 18px 18px 30px; overflow-y: auto; }
+#xhs-wx-root .wx-settings h3 { font-size: 14px; color: #1a1a1a; margin: 18px 0 10px; }
+#xhs-wx-root .wx-settings .row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px;
+}
+#xhs-wx-root .wx-settings .row button {
+  height: 28px; padding: 0 14px; border-radius: 6px; background: #07c160; color: #fff; font-size: 12px;
+}
+#xhs-wx-root .wx-settings .row button.danger { background: #fa5151; }
+#xhs-wx-root .wx-settings .hint { color: #aaa; font-size: 12px; margin-top: 14px; line-height: 1.7; }
+
+/* ---- toast ---- */
+#xhs-wx-root .wx-toast {
+  position: fixed; left: 50%; top: 12%; transform: translateX(-50%);
+  background: rgba(0,0,0,.75); color: #fff; padding: 9px 18px; border-radius: 8px;
+  font-size: 13px; z-index: 2147483647; pointer-events: none;
+  animation: wx-toast-in .18s ease-out;
+}
+@keyframes wx-toast-in { from { opacity: 0; transform: translate(-50%, -8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+`;
+
+  function injectCss() {
+    if (document.getElementById("xhs-wx-style")) return;
+    const style = document.createElement("style");
+    style.id = "xhs-wx-style";
+    style.textContent = CSS;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  /* ============================== toast ============================== */
+
+  let toastTimer = null;
+  function toast(message, type = "info") {
+    const root = ensureRoot();
+    let el = root.querySelector(".wx-toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "wx-toast";
+      root.appendChild(el);
+    }
+    el.textContent = message;
+    el.style.color = type === "error" ? "#ffd0d0" : type === "success" ? "#c8f7c5" : "#fff";
+    el.style.display = "block";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.style.display = "none"; }, 2200);
+  }
+
+  /* ============================== 设置 ============================== */
+
+  function isEnabled() {
+    return storeGet(STORE_KEYS.enabled, true) !== false;
+  }
+
+  function setEnabled(next) {
+    storeSet(STORE_KEYS.enabled, next);
+    location.reload();
+  }
+
+  function getSeenMap() {
+    return storeGet(STORE_KEYS.seenMap, {});
+  }
+
+  /* ============================== 全局状态 ============================== */
+
+  const state = {
+    notes: [],            // 左栏笔记会话 {noteId,url,title,cover,author,authorUrl,likeCount}
+    notesIndex: new Map(),
+    activeNote: null,     // 当前打开的笔记对象
+    activeDetail: null,   // 当前笔记的渲染数据（正文+评论）
+    myUserId: "",
+    myNickname: "",
+    myAvatar: "",
+    keyword: "",
+    listBottomHits: 0,
+    frameSeq: 0,          // iframe 加载序号（防切换错乱）
+    frameBusy: false,
+    navTab: "chat",
+  };
+
+  function getMyProfileFromDom() {
+    try {
+      // 侧边栏"我"的入口：最后一个指向 /user/profile/ 的侧栏链接
+      const links = document.querySelectorAll('a[href*="/user/profile/"]');
+      let mine = null;
+      for (const a of links) {
+        if (a.closest(".side-bar-component, .side-bar, nav, .user")) mine = a;
+      }
+      if (!mine && links.length) mine = links[links.length - 1];
+      if (mine) {
+        state.myUserId = uidFromProfileHref(mine.getAttribute("href")) || state.myUserId;
+        const img = mine.querySelector("img");
+        if (img) state.myAvatar = img.src || state.myAvatar;
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /* ============================== UI 骨架 ============================== */
+
+  function ensureRoot() {
+    let el = document.getElementById(ROOT_ID);
+    if (el) return el;
+    el = document.createElement("div");
+    el.id = ROOT_ID;
+    el.innerHTML = `
+      <header class="wx-top">
+        <div class="wx-brand"><span class="wx-brand-dot"></span>小红书 · 微信模式</div>
+        <button type="button" class="wx-top-btn" id="wx-refresh" title="刷新列表">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.1-5.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M19.5 5.2v4.3h-4.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <span class="wx-top-tip">滚动左栏可加载更多笔记</span>
+      </header>
+      <div class="wx-main">
+        <nav class="wx-navrail" aria-label="主导航">
+          <div class="wx-nav-avatar-wrap" id="wx-my-avatar-wrap" title="我">
+            <img class="wx-nav-avatar" id="wx-my-avatar" alt="我" />
+          </div>
+          <button type="button" class="wx-nav-btn active" data-tab="chat" title="笔记">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 6.5c0-1.4 1.1-2.5 2.5-2.5h11c1.4 0 2.5 1.1 2.5 2.5v8c0 1.4-1.1 2.5-2.5 2.5H11l-3.8 2.7c-.5.35-1.2 0-1.2-.6V17H6.5C5.1 17 4 15.9 4 14.5v-8z" fill="currentColor"/></svg>
+          </button>
+          <button type="button" class="wx-nav-btn" data-tab="settings" title="设置">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+          </button>
+          <div class="wx-nav-spacer"></div>
+          <button type="button" class="wx-nav-btn" id="wx-exit" title="切回原版界面">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M9.5 4.5v4h-5v11h11v-5h4v-10h-10z M13.5 8.5l6-6m0 0h-4.5m4.5 0v4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </nav>
+        <aside class="wx-aside" id="wx-aside">
+          <div class="wx-search">
+            <input id="wx-filter" type="search" placeholder="搜索标题 / 作者" autocomplete="off" />
+          </div>
+          <div class="wx-list" id="wx-list"></div>
+        </aside>
+        <div class="wx-resize-col" id="wx-resize-col" title="拖动调整宽度 · 双击还原"></div>
+        <section class="wx-detail">
+          <div class="wx-detail-head">
+            <div class="wx-detail-title" id="wx-detail-title">选择左侧笔记查看</div>
+            <div class="wx-detail-actions">
+              <button type="button" class="wx-link-btn" id="wx-like-toggle" hidden>点赞</button>
+              <button type="button" class="wx-link-btn" id="wx-collect-toggle" hidden>收藏</button>
+              <a class="wx-link-btn" id="wx-open-origin" href="#" target="_blank" rel="noopener">原页</a>
+            </div>
+          </div>
+          <div class="wx-detail-body" id="wx-detail-body">
+            <div class="wx-empty-detail">
+              <div class="icon">◎</div>
+              <div>点击左侧列表查看笔记</div>
+            </div>
+          </div>
+          <div class="wx-composer" id="wx-composer" hidden>
+            <div class="wx-composer-inner">
+              <div id="wx-input" class="wx-input" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="评论一下…"></div>
+              <div class="wx-composer-bar">
+                <span class="wx-composer-tip" id="wx-composer-tip"></span>
+                <button type="button" class="wx-send" id="wx-send" disabled>发送</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    `;
+    (document.body || document.documentElement).appendChild(el);
+    bindRootEvents(el);
+    applyStoredLeftWidth(el);
+    return el;
+  }
+
+  function applyStoredLeftWidth(rootEl) {
+    const w = Number(storeGet(STORE_KEYS.leftWidth, 0));
+    if (w >= 220 && w <= 480) {
+      rootEl.querySelector("#wx-aside").style.width = w + "px";
+    }
+  }
+
+  function bindRootEvents(rootEl) {
+    // 刷新：重扫当前 DOM
+    rootEl.querySelector("#wx-refresh").addEventListener("click", () => {
+      scanFeed(true);
+      toast("已刷新列表", "success");
+    });
+
+    // 退出微信模式
+    rootEl.querySelector("#wx-exit").addEventListener("click", () => {
+      setEnabled(false);
+    });
+
+    // 导航
+    rootEl.querySelectorAll(".wx-nav-btn[data-tab]").forEach((btn) => {
+      btn.addEventListener("click", () => switchNav(btn.dataset.tab));
+    });
+
+    // 搜索
+    const filterInput = rootEl.querySelector("#wx-filter");
+    filterInput.addEventListener("input", () => {
+      state.keyword = filterInput.value.trim().toLowerCase();
+      renderList();
+    });
+
+    // 列表滚动到底 -> 驱动原页面加载更多 feed
+    const listEl = rootEl.querySelector("#wx-list");
+    listEl.addEventListener("scroll", () => {
+      if (listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 60) {
+        triggerFeedLoadMore();
+      }
+    });
+
+    // 拖拽调宽
+    bindResize(rootEl);
+
+    // 输入框
+    const input = rootEl.querySelector("#wx-input");
+    const sendBtn = rootEl.querySelector("#wx-send");
+    const syncSend = () => {
+      sendBtn.disabled = !(input.textContent || "").trim();
+    };
+    input.addEventListener("input", syncSend);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        if (!sendBtn.disabled) sendBtn.click();
+      }
+    });
+    sendBtn.addEventListener("click", () => submitComment());
+
+    // 顶栏点赞/收藏按钮
+    rootEl.querySelector("#wx-like-toggle").addEventListener("click", () => actInteract("like"));
+    rootEl.querySelector("#wx-collect-toggle").addEventListener("click", () => actInteract("collect"));
+  }
+
+  function bindResize(rootEl) {
+    const col = rootEl.querySelector("#wx-resize-col");
+    const aside = rootEl.querySelector("#wx-aside");
+    let dragging = false;
+    col.addEventListener("mousedown", (e) => {
+      dragging = true;
+      col.classList.add("dragging");
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      const rootRect = rootEl.getBoundingClientRect();
+      const w = Math.min(480, Math.max(220, e.clientX - rootRect.left - 56));
+      aside.style.width = w + "px";
+    });
+    document.addEventListener("mouseup", () => {
+      if (!dragging) return;
+      dragging = false;
+      col.classList.remove("dragging");
+      storeSet(STORE_KEYS.leftWidth, parseFloat(aside.style.width) || 300);
+    });
+    col.addEventListener("dblclick", () => {
+      aside.style.width = "300px";
+      storeSet(STORE_KEYS.leftWidth, 300);
+    });
+  }
+
+  function switchNav(tab) {
+    state.navTab = tab;
+    const rootEl = ensureRoot();
+    rootEl.querySelectorAll(".wx-nav-btn[data-tab]").forEach((b) => {
+      b.classList.toggle("active", b.dataset.tab === tab);
+    });
+    const list = rootEl.querySelector("#wx-list");
+    if (tab === "settings") {
+      renderSettings(list);
+    } else {
+      renderList();
+    }
+  }
+
+  /* ============================== feed 扫描 ============================== */
+
+  function scanFeed(force) {
+    const items = document.querySelectorAll(".note-item");
+    let added = 0;
+    for (const item of items) {
+      const note = parseNoteItem(item);
+      if (!note || !note.noteId) continue;
+      if (!state.notesIndex.has(note.noteId)) {
+        state.notesIndex.set(note.noteId, note);
+        state.notes.push(note);
+        added++;
+      } else if (force) {
+        // 刷新时更新已有条目的最新数据
+        const old = state.notesIndex.get(note.noteId);
+        Object.assign(old, note);
+      }
+    }
+    if (added > 0) {
+      log("feed 扫描：新增", added, "条，总计", state.notes.length);
+      if (state.navTab === "chat") renderList();
+    } else if (force) {
+      if (state.navTab === "chat") renderList();
+    }
+    return added;
+  }
+
+  function parseNoteItem(item) {
+    try {
+      const coverLink = item.querySelector("a.cover[href]") || item.querySelector('a[href*="/explore/"]');
+      const href = coverLink ? coverLink.getAttribute("href") : "";
+      const noteId = noteIdFromHref(href);
+      if (!noteId) return null;
+      const titleEl = item.querySelector(".title");
+      const title = titleEl ? titleEl.textContent.trim() : "";
+      const authorEl = item.querySelector(".author .name");
+      const author = authorEl ? authorEl.textContent.trim() : "";
+      const authorUrl = authorEl ? (authorEl.getAttribute("href") || "") : "";
+      const countEl = item.querySelector(".like-wrapper .count");
+      const likeCount = countEl ? countEl.textContent.trim() : "";
+      const img = item.querySelector(".cover img, img");
+      let cover = "";
+      if (img) cover = img.getAttribute("src") || "";
+      return {
+        noteId,
+        url: new URL(href, location.origin).href,
+        title: title || "(无标题)",
+        cover,
+        author,
+        authorUrl: authorUrl ? new URL(authorUrl, location.origin).href : "",
+        likeCount,
+      };
+    } catch (e) {
+      warn("解析卡片失败", e);
+      return null;
+    }
+  }
+
+  function observeFeed() {
+    const mo = new MutationObserver(() => {
+      scanFeed(false);
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+    log("MutationObserver 已启动");
+  }
+
+  // 驱动原页面滚动，触发小红书 feed 无限加载
+  let feedLoadTimer = null;
+  function triggerFeedLoadMore() {
+    if (feedLoadTimer) return;
+    feedLoadTimer = setTimeout(() => {
+      feedLoadTimer = null;
+      try {
+        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" });
+        log("已驱动原页面滚动加载更多 feed");
+      } catch (e) { /* 忽略 */ }
+    }, 400);
+    showListLoading();
+  }
+
+  let listLoadingEl = null;
+  function showListLoading() {
+    const rootEl = ensureRoot();
+    const list = rootEl.querySelector("#wx-list");
+    if (list.querySelector(".wx-list-loading")) return;
+    listLoadingEl = document.createElement("div");
+    listLoadingEl.className = "wx-list-loading";
+    listLoadingEl.textContent = "加载更多笔记…";
+    list.appendChild(listLoadingEl);
+    setTimeout(() => {
+      if (listLoadingEl && listLoadingEl.parentNode) listLoadingEl.remove();
+      listLoadingEl = null;
+    }, 3000);
+  }
+
+  /* ============================== 会话列表渲染 ============================== */
+
+  function renderList() {
+    const rootEl = ensureRoot();
+    const list = rootEl.querySelector("#wx-list");
+    const seen = getSeenMap();
+    const kw = state.keyword;
+    const items = kw
+      ? state.notes.filter(
+          (n) => n.title.toLowerCase().includes(kw) || (n.author || "").toLowerCase().includes(kw)
+        )
+      : state.notes;
+
+    if (!items.length) {
+      list.innerHTML = `<div class="wx-empty-list">${
+        state.notes.length ? "没有匹配的笔记" : "正在获取笔记流…<br/>请稍候或在原页面确认已登录"
+      }</div>`;
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    items.forEach((note) => {
+      const isUnread = !seen[note.noteId];
+      const isActive = state.activeNote && state.activeNote.noteId === note.noteId;
+      const div = document.createElement("div");
+      div.className = "wx-item" + (isActive ? " active" : "");
+      div.dataset.noteId = note.noteId;
+      div.innerHTML = `
+        ${note.cover ? `<img class="wx-item-cover" loading="lazy" src="${escapeHtml(note.cover)}" alt=""/>` : ""}
+        <div class="wx-item-main">
+          <div class="wx-item-title">${escapeHtml(note.title)}</div>
+          <div class="wx-item-meta">
+            <span class="author">${escapeHtml(note.author || "未知作者")}</span>
+            <span class="likes">♥ ${escapeHtml(note.likeCount || "0")}</span>
+          </div>
+        </div>
+        ${isUnread ? '<span class="wx-item-unread"></span>' : ""}
+      `;
+      div.addEventListener("click", () => openNote(note));
+      frag.appendChild(div);
+    });
+    list.innerHTML = "";
+    list.appendChild(frag);
+  }
+
+  function markNoteSeen(note) {
+    const seen = getSeenMap();
+    seen[note.noteId] = Date.now();
+    // 只保留最近 800 条，避免无限增长
+    const ids = Object.keys(seen);
+    if (ids.length > 800) {
+      ids.sort((a, b) => seen[a] - seen[b]);
+      for (const id of ids.slice(0, ids.length - 800)) delete seen[id];
+    }
+    storeSet(STORE_KEYS.seenMap, seen);
+  }
+
+  /* ============================== 笔记加载：正文（SSR） ============================== */
+
+  // fetch 笔记页 -> 解析内嵌 __INITIAL_STATE__
+  async function fetchNoteDetail(note) {
+    const res = await fetch(note.url, {
+      credentials: "include",
+      headers: { Accept: "text/html,application/xhtml+xml" },
+    });
+    if (!res.ok) throw new Error("笔记页请求失败 HTTP " + res.status);
+    const html = await res.text();
+    const m = /window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*<\/script>/.exec(html);
+    if (!m) throw new Error("未找到 __INITIAL_STATE__");
+    let stateJson;
+    try {
+      stateJson = new Function("return (" + m[1] + ");")();
+    } catch (e) {
+      throw new Error("解析 __INITIAL_STATE__ 失败：" + e.message);
+    }
+    const detailMap = stateJson && stateJson.note && stateJson.note.noteDetailMap;
+    if (!detailMap) throw new Error("noteDetailMap 不存在");
+    // 优先精确匹配，否则取第一个
+    const entry = detailMap[note.noteId] || Object.values(detailMap)[0];
+    const nd = entry && entry.note;
+    if (!nd) throw new Error("笔记数据不存在（可能需要登录或链接失效）");
+    return normalizeNoteData(nd);
+  }
+
+  function normalizeNoteData(nd) {
+    const user = nd.user || {};
+    const interact = nd.interactInfo || {};
+    const images = [];
+    for (const img of nd.imageList || []) {
+      const url = img.url || (img.infoList && img.infoList.length && img.infoList[img.infoList.length - 1].url) || "";
+      if (url) images.push(url);
+    }
+    return {
+      noteId: nd.noteId,
+      type: nd.type || "normal",
+      title: nd.title || "",
+      desc: nd.desc || "",
+      tagList: (nd.tagList || []).map((t) => ({ id: t.id, name: t.name })),
+      time: nd.time || 0,
+      ipLocation: nd.ipLocation || "",
+      images,
+      author: {
+        userId: user.userId || "",
+        nickname: user.nickname || "",
+        avatar: (user.images && (user.images.avatar || user.images.preview)) || "",
+        homepage: user.userId ? "https://www.xiaohongshu.com/user/profile/" + user.userId : "",
+      },
+      interact: {
+        liked: !!interact.liked,
+        collected: !!interact.collected,
+        likedCount: interact.likedCount,
+        collectedCount: interact.collectedCount,
+        commentCount: interact.commentCount,
+        shareCount: interact.shareCount,
+      },
+    };
+  }
+
+  /* ============================== 笔记加载：评论（iframe 引擎） ============================== */
+
+  function ensureEngineFrame() {
+    let frame = document.getElementById("xhs-wx-engine");
+    if (!frame) {
+      frame = document.createElement("iframe");
+      frame.id = "xhs-wx-engine";
+      Object.assign(frame.style, {
+        position: "fixed",
+        left: "0",
+        top: "0",
+        width: "1280px",
+        height: "900px",
+        // 不用 visibility/display 隐藏，避免阻止页面内部懒加载；opacity 0 + 极低层级使其不可见
+        opacity: "0",
+        zIndex: "-1",
+        pointerEvents: "none",
+        border: "none",
+      });
+      frame.setAttribute("aria-hidden", "true");
+      frame.setAttribute("tabindex", "-1");
+      (document.body || document.documentElement).appendChild(frame);
+      log("引擎 iframe 已创建");
+    }
+    return frame;
+  }
+
+  // 加载笔记到 iframe，等待正文+评论渲染完成，返回 doc
+  function loadNoteInFrame(note, { waitComments = true } = {}) {
+    const frame = ensureEngineFrame();
+    const seq = ++state.frameSeq;
+    const targetUrl = note.url.split("#")[0];
+    let currentUrl = "";
+    try {
+      currentUrl = (frame.contentWindow && frame.contentWindow.location && frame.contentWindow.location.href) || "";
+    } catch (e) { /* 忽略 */ }
+    const alreadyThere = currentUrl.split("#")[0] === targetUrl && !!frame.contentDocument;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => finish(new Error("笔记页加载超时")), 20000);
+
+      function finish(err, doc) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (err) reject(err);
+        else resolve({ doc, frame });
+      }
+
+      if (alreadyThere) {
+        startPolling();
+      } else {
+        frame.addEventListener("load", () => startPolling(), { once: true });
+        frame.src = note.url;
+      }
+
+      // 轮询等待评论容器出现（或超时降级为只要正文）
+      function startPolling() {
+        const started = Date.now();
+        (function poll() {
+          if (seq !== state.frameSeq) return finish(new Error("已切换到其他笔记"));
+          let doc = null;
+          try {
+            doc = frame.contentDocument;
+          } catch (e) {
+            return finish(new Error("无法访问引擎页面"));
+          }
+          if (!doc) {
+            if (Date.now() - started > 18000) return finish(new Error("引擎页面不可用"));
+            return setTimeout(poll, 300);
+          }
+          const hasBody = !!doc.querySelector(".note-container, #detail-desc");
+          const commentsListed = !!doc.querySelector(".comments-container .comment-item");
+          const waited = Date.now() - started;
+          if (hasBody && (!waitComments || commentsListed || waited > 8000)) {
+            // 再等 500ms 让评论尽量渲染完整
+            setTimeout(() => {
+              if (seq === state.frameSeq) finish(null, doc);
+              else finish(new Error("已切换到其他笔记"));
+            }, 500);
+            return;
+          }
+          if (!hasBody && waited > 15000) return finish(null, doc); // 降级返回
+          setTimeout(poll, 350);
+        })();
+      }
+    });
+  }
+
+  // 从 iframe doc 解析评论（含已展开的楼中楼）
+  function parseComments(doc) {
+    const container = doc.querySelector(".comments-container");
+    if (!container) return { comments: [], totalText: "" };
+    const totalEl = container.querySelector(".total, .comments-number, .comment-title");
+    const totalText = totalEl ? totalEl.textContent.trim() : "";
+
+    // 一级评论 = 不在 .reply-container 内、父链上没有其他 .comment-item 的项
+    const all = [...container.querySelectorAll(".comment-item")];
+    const topItems = all.filter(
+      (el) => !el.parentElement.closest(".comment-item") && !el.closest(".reply-container")
+    );
+
+    const out = [];
+    for (const item of topItems) {
+      const c = parseOneComment(item);
+      if (!c) continue;
+      // 楼中楼：该评论自己的 reply-container 里的直接子评论
+      const replyBox = item.querySelector(".reply-container");
+      if (replyBox) {
+        const subs = [];
+        for (const sub of replyBox.querySelectorAll(".comment-item")) {
+          // 归属判断：closest 的 reply-container 必须是 item 的这个
+          if (sub.closest(".reply-container") !== replyBox) continue;
+          const sc = parseOneComment(sub);
+          if (sc) subs.push(sc);
+        }
+        c.subComments = subs;
+        const more = replyBox.querySelector(".show-more, .reply-more");
+        if (more) c.moreText = more.textContent.trim();
+      }
+      out.push(c);
+    }
+    return { comments: out, totalText };
+  }
+
+  function parseOneComment(item) {
+    // 字段按文档序取第一个（当前评论的节点在楼中楼之前）
+    const authorBox = item.querySelector(".author");
+    const nameEl = authorBox && authorBox.querySelector(".name");
+    if (!nameEl && authorBox && authorBox.closest("a")) {
+      // 结构变体：author 链接本身带名字
+    }
+    const nameFallback = authorBox ? authorBox.textContent.trim() : "";
+    const name = nameEl ? nameEl.textContent.trim() : nameFallback;
+    if (!name) return null;
+    const authorLink = (nameEl && nameEl.closest("a")) || (authorBox && authorBox.closest("a"));
+    const authorHref = authorLink ? authorLink.getAttribute("href") || "" : "";
+    const contentEl = item.querySelector(".content");
+    const dateEl = item.querySelector(".date");
+    const likeEl = item.querySelector(".like");
+    const avatarImg = authorBox ? authorBox.querySelector("img") : null;
+    // “作者”徽标：author 区域内出现红色小标签文本“作者”
+    const isAuthor = !!authorBox && /(^|\s)作者(\s|$)/.test(authorBox.textContent || "");
+    return {
+      author: name,
+      authorUrl: authorHref ? new URL(authorHref, "https://www.xiaohongshu.com").href : "",
+      userId: uidFromProfileHref(authorHref),
+      avatar: avatarImg ? avatarImg.src : "",
+      content: contentEl ? contentEl.textContent.trim() : "",
+      date: dateEl ? dateEl.textContent.trim() : "",
+      likeText: likeEl ? likeEl.textContent.trim() : "",
+      isAuthor,
+    };
+  }
+
+  /* ============================== 打开笔记 & 渲染 ============================== */
+
+  async function openNote(note) {
+    state.activeNote = note;
+    markNoteSeen(note);
+    renderList(); // 高亮 + 消除未读点
+    const rootEl = ensureRoot();
+    const body = rootEl.querySelector("#wx-detail-body");
+    const composer = rootEl.querySelector("#wx-composer");
+    const titleEl = rootEl.querySelector("#wx-detail-title");
+    const openBtn = rootEl.querySelector("#wx-open-origin");
+    const likeBtn = rootEl.querySelector("#wx-like-toggle");
+    const collectBtn = rootEl.querySelector("#wx-collect-toggle");
+
+    titleEl.textContent = note.title;
+    openBtn.href = note.url;
+    composer.hidden = false;
+    body.innerHTML = `<div class="wx-loading-detail">正在加载笔记与评论…</div>`;
+    likeBtn.hidden = true;
+    collectBtn.hidden = true;
+
+    // 正文与评论并行：SSR fetch 很快先画正文，iframe 到位后补评论
+    let detail = null;
+    try {
+      detail = await fetchNoteDetail(note);
+    } catch (e) {
+      warn("SSR 解析失败", e);
+    }
+
+    // 若已切换笔记则放弃渲染
+    if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
+    state.activeDetail = { ...detail, comments: [] };
+    renderDetailBody(true);
+
+    // iframe：评论 + 互动操作载体
+    try {
+      const { doc } = await loadNoteInFrame(note, { waitComments: true });
+      if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
+      // 用 iframe 里的实时数据修正互动状态（点赞状态 SSR 里拿到的可能不准）
+      const frameState = extractFrameState(doc);
+      const parsed = parseComments(doc);
+      state.activeDetail = {
+        ...state.activeDetail,
+        comments: parsed.comments,
+        totalText: parsed.totalText,
+        interact: frameState.interact || state.activeDetail.interact,
+      };
+      renderDetailBody(false);
+      updateInteractButtons();
+      log("评论加载完成：", parsed.comments.length, "条一级评论");
+    } catch (e) {
+      warn("评论加载失败", e);
+      if (state.activeNote && state.activeNote.noteId === note.noteId) {
+        state.activeDetail.commentError = e.message;
+        renderDetailBody(false);
+      }
+    }
+  }
+
+  // 从 iframe 文档提取互动栏数据（数字与激活状态）
+  function extractFrameState(doc) {
+    try {
+      const interactEl = doc.querySelector(".interact-container");
+      if (!interactEl) return {};
+      const counts = [...interactEl.querySelectorAll(".count")].map((el) => el.textContent.trim());
+      const liked = !!interactEl.querySelector(".like-active, .active");
+      return {
+        interact: {
+          likedCount: counts[0] || "",
+          collectedCount: counts[1] || "",
+          commentCount: counts[2] || "",
+          liked,
+        },
+      };
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function noteHtml(detail) {
+    const author = detail.author || {};
+    const interact = detail.interact || {};
+    const timeStr = fmtTime(detail.time);
+    const metaBits = [timeStr, detail.ipLocation].filter(Boolean).join(" · ");
+    const tagsHtml = (detail.tagList || [])
+      .map((t) => `<a class="wx-tag" href="https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(t.name)}" target="_blank" rel="noopener">#${escapeHtml(t.name)}</a>`)
+      .join(" ");
+
+    const images = detail.images || [];
+    const imgsHtml = images.length
+      ? `<div class="wx-bubble-imgs n${Math.min(images.length, 9)}" data-imgs>${images
+          .map((u) => `<img loading="lazy" src="${escapeHtml(u)}" data-viewer alt=""/>`)
+          .join("")}</div>`
+      : "";
+
+    return `
+      <div class="wx-msg" data-role="note">
+        ${author.avatar ? `<img class="wx-avatar" src="${escapeHtml(author.avatar)}" alt=""/>` : `<div class="wx-avatar"></div>`}
+        <div class="wx-msg-body">
+          <div class="wx-msg-name">${escapeHtml(author.nickname || "")}</div>
+          <div class="wx-bubble">
+            ${detail.title ? `<div style="font-weight:600;margin-bottom:4px">${escapeHtml(detail.title)}</div>` : ""}
+            <div>${escapeHtml(detail.desc || (detail.title ? "" : "（无正文）"))}${tagsHtml ? " " + tagsHtml : ""}</div>
+            ${imgsHtml}
+            <div class="wx-interact" data-interact>
+              <span class="act ${interact.liked ? "on" : ""}" data-act="like" title="点赞">♥ <span class="n">${escapeHtml(fmtCount(interact.likedCount) || "0")}</span></span>
+              <span class="sep">|</span>
+              <span class="act ${interact.collected ? "on" : ""}" data-act="collect" title="收藏">★ <span class="n">${escapeHtml(fmtCount(interact.collectedCount) || "0")}</span></span>
+              <span class="sep">|</span>
+              <span class="act" title="评论数">💬 <span class="n">${escapeHtml(fmtCount(interact.commentCount) || "0")}</span></span>
+            </div>
+          </div>
+          <div class="wx-bubble-meta"><span>${escapeHtml(metaBits)}</span></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function commentHtml(c) {
+    const mine = state.myUserId && c.userId === state.myUserId;
+    const name = escapeHtml(c.author || "网友");
+    return `
+      <div class="wx-msg ${mine ? "me" : ""}" data-cid="${escapeHtml(c.userId || "")}">
+        ${c.avatar ? `<img class="wx-avatar" src="${escapeHtml(c.avatar)}" alt=""/>` : `<div class="wx-avatar"></div>`}
+        <div class="wx-msg-body">
+          <div class="wx-msg-name">${c.isAuthor ? '<span class="wx-badge">作者</span>' : ""}${name}</div>
+          <div class="wx-bubble">${escapeHtml(c.content)}</div>
+          ${subCommentsHtml(c)}
+          <div class="wx-bubble-meta">
+            <span>${escapeHtml(c.date || "")}</span>
+            ${c.likeText ? `<span>♥ ${escapeHtml(c.likeText)}</span>` : ""}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function subCommentsHtml(c) {
+    const subs = c.subComments || [];
+    if (!subs.length && !c.moreText) return "";
+    return `
+      <div class="wx-subcomments">
+        ${subs
+          .map(
+            (s) => `
+          <div class="wx-subcomment">
+            <div><span class="who ${s.isAuthor ? "author-tag" : ""}">${escapeHtml(s.author)}</span>${escapeHtml(s.content)}</div>
+            <div class="sub-meta">${escapeHtml(s.date || "")}${s.likeText ? " · ♥ " + escapeHtml(s.likeText) : ""}</div>
+          </div>`
+          )
+          .join("")}
+        ${c.moreText ? `<div class="wx-expand-replies" data-more>${escapeHtml(c.moreText)} ↧</div>` : ""}
+      </div>
+    `;
+  }
+
+  function renderDetailBody(loadingComments) {
+    const rootEl = ensureRoot();
+    const body = rootEl.querySelector("#wx-detail-body");
+    const detail = state.activeDetail;
+    if (!detail) return;
+
+    const parts = [];
+    parts.push(noteHtml(detail));
+
+    if (detail.commentError) {
+      parts.push(`<div class="wx-divider">评论加载失败：${escapeHtml(detail.commentError)}</div>`);
+    } else if (loadingComments) {
+      parts.push(`<div class="wx-divider">评论加载中…</div>`);
+    } else {
+      const total = detail.totalText || `共 ${detail.comments.length} 条评论`;
+      parts.push(`<div class="wx-divider">${escapeHtml(total)}</div>`);
+      for (const c of detail.comments) parts.push(commentHtml(c));
+      if (!detail.comments.length) {
+        parts.push(`<div class="wx-divider">还没有评论，抢首评</div>`);
+      }
+    }
+
+    body.innerHTML = parts.join("");
+    body.scrollTop = 0;
+
+    // 事件绑定：图片查看器 / 互动 / 展开楼中楼
+    bindDetailEvents(body);
+    updateInteractButtons();
+  }
+
+  function bindDetailEvents(body) {
+    // 图片查看
+    body.querySelectorAll("[data-imgs] img[data-viewer]").forEach((img) => {
+      img.addEventListener("click", () => {
+        const urls = [...img.closest("[data-imgs]").querySelectorAll("img")]
+          .map((el) => el.getAttribute("src"))
+          .filter(Boolean);
+        openImageViewer(urls.indexOf(img.getAttribute("src")), urls);
+      });
+    });
+    // 气泡内互动
+    body.querySelectorAll("[data-interact] .act").forEach((act) => {
+      act.addEventListener("click", () => actInteract(act.dataset.act));
+    });
+    // 展开楼中楼
+    body.querySelectorAll("[data-more]").forEach((el) => {
+      el.addEventListener("click", () => expandReplies(el));
+    });
+  }
+
+  function updateInteractButtons() {
+    const rootEl = ensureRoot();
+    const detail = state.activeDetail;
+    const likeBtn = rootEl.querySelector("#wx-like-toggle");
+    const collectBtn = rootEl.querySelector("#wx-collect-toggle");
+    if (!detail || !state.activeNote) return;
+    const interact = detail.interact || {};
+    likeBtn.hidden = false;
+    collectBtn.hidden = false;
+    likeBtn.textContent = (interact.liked ? "♥ 已赞 " : "♡ 点赞 ") + (fmtCount(interact.likedCount) || "");
+    likeBtn.classList.toggle("on", !!interact.liked);
+    collectBtn.textContent = (interact.collected ? "★ 已藏 " : "☆ 收藏 ") + (fmtCount(interact.collectedCount) || "");
+    collectBtn.classList.toggle("on", !!interact.collected);
+    // 同步气泡内互动条
+    const body = rootEl.querySelector("#wx-detail-body");
+    const bubbleLike = body.querySelector('[data-act="like"]');
+    const bubbleCollect = body.querySelector('[data-act="collect"]');
+    if (bubbleLike) {
+      bubbleLike.classList.toggle("on", !!interact.liked);
+      bubbleLike.querySelector(".n").textContent = fmtCount(interact.likedCount) || "0";
+    }
+    if (bubbleCollect) {
+      bubbleCollect.classList.toggle("on", !!interact.collected);
+      bubbleCollect.querySelector(".n").textContent = fmtCount(interact.collectedCount) || "0";
+    }
+  }
+
+  /* ============================== 互动操作（iframe 驱动） ============================== */
+
+  // 在引擎 iframe 中定位互动按钮：返回 {like, collect}
+  function findInteractButtons(doc) {
+    const box = doc.querySelector(".interact-container");
+    if (!box) return {};
+    // 小红书互动栏通常为若干按钮块，每块含一个 .count；第1块=赞，第2块=收藏
+    const blocks = [...box.querySelectorAll("*")]
+      .filter((el) => {
+        if (el.children.length > 1) return false;
+        return el.querySelector(":scope > .count") || el.classList.contains("count");
+      });
+    // 直接策略：找含 .count 的最内层按钮容器
+    const holders = [];
+    for (const el of box.querySelectorAll("button, [role=button], div, span")) {
+      if (el.querySelector(":scope > .count") && !el.querySelector(":scope > * > .count")) {
+        holders.push(el);
+      }
+      if (holders.length >= 4) break;
+    }
+    const result = {};
+    if (holders[0]) result.like = holders[0];
+    if (holders[1]) result.collect = holders[1];
+    if (!result.like || !result.collect) {
+      log("互动栏结构：", box.innerHTML.slice(0, 600));
+    }
+    return result;
+  }
+
+  async function actInteract(kind) {
+    const note = state.activeNote;
+    const detail = state.activeDetail;
+    if (!note || !detail) return;
+    const frame = document.getElementById("xhs-wx-engine");
+    const doc = frame && frame.contentDocument;
+    if (!doc) {
+      toast("页面引擎未就绪，请重新打开笔记", "error");
+      return;
+    }
+    const buttons = findInteractButtons(doc);
+    const target = kind === "like" ? buttons.like : buttons.collect;
+    if (!target) {
+      toast("未定位到" + (kind === "like" ? "点赞" : "收藏") + "按钮，可点右上「原页」操作", "error");
+      return;
+    }
+    try {
+      target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await sleep(900);
+      // 从 iframe 同步最新状态
+      const frameState = extractFrameState(doc);
+      if (frameState.interact) {
+        state.activeDetail.interact = {
+          ...state.activeDetail.interact,
+          ...frameState.interact,
+          collected: kind === "collect" ? !detail.interact.collected : detail.interact.collected,
+        };
+        updateInteractButtons();
+        toast(kind === "like" ? "已执行点赞/取消" : "已执行收藏/取消", "success");
+      } else {
+        toast("已点击，请稍后刷新确认", "info");
+      }
+    } catch (e) {
+      warn("互动失败", e);
+      toast("操作失败：" + e.message, "error");
+    }
+  }
+
+  async function expandReplies(el) {
+    const note = state.activeNote;
+    if (!note) return;
+    el.textContent = "展开中…";
+    const frame = document.getElementById("xhs-wx-engine");
+    const doc = frame && frame.contentDocument;
+    if (!doc) {
+      el.textContent = "引擎不可用";
+      return;
+    }
+    // 在 iframe 里点击所有“展开回复”
+    let clicked = 0;
+    for (const more of doc.querySelectorAll(".comments-container .show-more, .comments-container .reply-more")) {
+      try {
+        more.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        clicked++;
+      } catch (e) { /* 忽略 */ }
+    }
+    if (!clicked) {
+      toast("没有可展开的回复", "info");
+      renderDetailBody(false);
+      return;
+    }
+    await sleep(1200);
+    const parsed = parseComments(doc);
+    if (state.activeDetail) {
+      state.activeDetail.comments = parsed.comments;
+      renderDetailBody(false);
+      toast("已展开回复", "success");
+    }
+  }
+
+  /* ============================== 发送评论 ============================== */
+
+  async function submitComment() {
+    const rootEl = ensureRoot();
+    const input = rootEl.querySelector("#wx-input");
+    const sendBtn = rootEl.querySelector("#wx-send");
+    const tip = rootEl.querySelector("#wx-composer-tip");
+    const text = (input.textContent || "").trim();
+    const note = state.activeNote;
+    if (!text || !note) return;
+
+    const frame = document.getElementById("xhs-wx-engine");
+    const doc = frame && frame.contentDocument;
+    if (!doc) {
+      toast("页面引擎未就绪，请重新打开笔记", "error");
+      return;
+    }
+
+    const box = doc.querySelector('[contenteditable="true"]');
+    const submit = doc.querySelector(".submit");
+    if (!box || !submit) {
+      toast("未找到评论输入区，可点右上「原页」评论", "error");
+      return;
+    }
+
+    sendBtn.disabled = true;
+    tip.textContent = "发送中…";
+    try {
+      box.focus();
+      // React 受控 contenteditable：优先在 iframe 文档上下文用 execCommand 触发 input 事件
+      box.textContent = "";
+      const sel = doc.getSelection();
+      const range = doc.createRange();
+      range.selectNodeContents(box);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      let inserted = false;
+      try {
+        inserted = doc.execCommand("insertText", false, text);
+      } catch (e) {
+        inserted = false;
+      }
+      // execCommand 不可用时直接改内容 + 派发 input
+      if (!inserted || (box.textContent || "").trim() !== text) {
+        box.textContent = text;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await sleep(300);
+      submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await sleep(1500);
+      // 刷新评论
+      const parsed = parseComments(doc);
+      if (state.activeDetail) {
+        state.activeDetail.comments = parsed.comments;
+        renderDetailBody(false);
+      }
+      input.textContent = "";
+      tip.textContent = "";
+      toast("评论已发送", "success");
+    } catch (e) {
+      warn("评论发送失败", e);
+      tip.textContent = "";
+      toast("评论发送失败：" + e.message, "error");
+    } finally {
+      sendBtn.disabled = !(input.textContent || "").trim();
+    }
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /* ============================== 图片查看器 ============================== */
+
+  let viewerState = { urls: [], index: 0, el: null };
+
+  function openImageViewer(index, urls) {
+    closeImageViewer();
+    const rootEl = ensureRoot();
+    const viewer = document.createElement("div");
+    viewer.className = "wx-viewer";
+    viewer.innerHTML = `
+      <span class="wx-viewer-close" title="关闭 (Esc)">×</span>
+      ${index > 0 ? '<span class="wx-viewer-arrow left" title="上一张">‹</span>' : ""}
+      ${index < urls.length - 1 ? '<span class="wx-viewer-arrow right" title="下一张">›</span>' : ""}
+      <img alt=""/>
+      <div class="wx-viewer-index"></div>
+    `;
+    rootEl.appendChild(viewer);
+    viewerState = { urls, index, el: viewer };
+
+    const img = viewer.querySelector("img");
+    img.src = urls[index];
+    viewer.querySelector(".wx-viewer-index").textContent = `${index + 1} / ${urls.length}`;
+
+    viewer.addEventListener("click", (e) => {
+      if (e.target === viewer || e.target.classList.contains("wx-viewer-close")) closeImageViewer();
+    });
+    const left = viewer.querySelector(".wx-viewer-arrow.left");
+    const right = viewer.querySelector(".wx-viewer-arrow.right");
+    if (left) left.addEventListener("click", () => stepViewer(-1));
+    if (right) right.addEventListener("click", () => stepViewer(1));
+    document.addEventListener("keydown", viewerKeyHandler);
+  }
+
+  function viewerKeyHandler(e) {
+    if (!viewerState.el) return;
+    if (e.key === "Escape") closeImageViewer();
+    else if (e.key === "ArrowLeft") stepViewer(-1);
+    else if (e.key === "ArrowRight") stepViewer(1);
+  }
+
+  function stepViewer(delta) {
+    const { urls, el } = viewerState;
+    if (!el || !urls.length) return;
+    let next = viewerState.index + delta;
+    next = Math.max(0, Math.min(urls.length - 1, next));
+    if (next === viewerState.index) return;
+    viewerState.index = next;
+    el.querySelector("img").src = urls[next];
+    el.querySelector(".wx-viewer-index").textContent = `${next + 1} / ${urls.length}`;
+    const left = el.querySelector(".wx-viewer-arrow.left");
+    const right = el.querySelector(".wx-viewer-arrow.right");
+    if (left) left.style.display = next > 0 ? "" : "none";
+    if (right) right.style.display = next < urls.length - 1 ? "" : "none";
+  }
+
+  function closeImageViewer() {
+    if (viewerState.el) {
+      viewerState.el.remove();
+      viewerState.el = null;
+    }
+    document.removeEventListener("keydown", viewerKeyHandler);
+  }
+
+  /* ============================== 设置面板 ============================== */
+
+  function renderSettings(list) {
+    const wrap = document.createElement("div");
+    wrap.className = "wx-settings";
+    wrap.innerHTML = `
+      <h3>外观</h3>
+      <div class="row"><span>左栏宽度</span><button id="wx-set-width">重置宽度</button></div>
+      <div class="row"><span>清除已读记录</span><button id="wx-set-clear-seen">清除</button></div>
+      <h3>账号</h3>
+      <div class="row"><span>当前身份</span><span style="color:#666">${escapeHtml(state.myNickname || state.myUserId || "未识别")}</span></div>
+      <h3>模式</h3>
+      <div class="row"><span>切回原版界面</span><button class="danger" id="wx-set-exit">退出微信模式</button></div>
+      <div class="hint">
+        说明：本脚本的评论/点赞/收藏通过页面自身能力完成，不会伪造请求。<br/>
+        若笔记或评论加载失败，多为网络或登录态问题，刷新页面即可。<br/>
+        v0.1 仅支持首页“发现”feed，其他页面（搜索/个人主页）保持原样。
+      </div>
+    `;
+    list.innerHTML = "";
+    list.appendChild(wrap);
+
+    wrap.querySelector("#wx-set-width").addEventListener("click", () => {
+      document.getElementById("wx-aside").style.width = "300px";
+      storeSet(STORE_KEYS.leftWidth, 300);
+      toast("已重置宽度", "success");
+    });
+    wrap.querySelector("#wx-set-clear-seen").addEventListener("click", () => {
+      GM_deleteValue(STORE_KEYS.seenMap);
+      toast("已清除，刷新后生效", "success");
+    });
+    wrap.querySelector("#wx-set-exit").addEventListener("click", () => setEnabled(false));
+  }
+
+  /* ============================== 启动 ============================== */
+
+  function isFeedPage() {
+    return location.pathname === "/explore" || location.pathname === "/" || location.pathname === "";
+  }
+
+  function applyMyProfileToUi() {
+    const rootEl = ensureRoot();
+    const avatar = rootEl.querySelector("#wx-my-avatar");
+    if (state.myAvatar) avatar.src = state.myAvatar;
+    rootEl.querySelector("#wx-my-avatar-wrap").title = state.myNickname || "我";
+  }
+
+  function boot() {
+    if (!isEnabled()) {
+      log("微信模式已停用，可通过油猴菜单启用");
+      return;
+    }
+    if (!isFeedPage()) {
+      log("非 feed 页面，跳过启动：" + location.pathname);
+      return;
+    }
+    injectCss();
+    getMyProfileFromDom();
+    ensureRoot();
+    applyMyProfileToUi();
+    scanFeed(true);
+    observeFeed();
+    // 首屏 feed 可能渲染较晚，延迟补扫
+    setTimeout(() => scanFeed(false), 1500);
+    setTimeout(() => scanFeed(false), 4000);
+    log("微信模式已启动");
+  }
+
+  GM_registerMenuCommand("启用 / 停用微信模式", () => {
+    setEnabled(!isEnabled());
+  });
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
+  } else {
+    boot();
+  }
+})();
