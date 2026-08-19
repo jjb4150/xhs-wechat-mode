@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.1.0
+// @version      0.1.1
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -33,6 +33,7 @@
     seenMap: "xhsWxSeenMap",
     likedMap: "xhsWxLikedMap",
     collectedMap: "xhsWxCollectedMap",
+    dark: "xhsWxDark",
   };
 
   /* ============================== 工具 ============================== */
@@ -107,23 +108,79 @@
   const CSS = `
 #xhs-wx-root * { box-sizing: border-box; margin: 0; padding: 0; }
 #xhs-wx-root {
+  /* 主题变量（浅色） */
+  --bg-app: #f2f2f2;
+  --bg-top: #2e2e2e;
+  --bg-rail: #2a2a2a;
+  --bg-aside: #ffffff;
+  --bg-search: #f2f2f2;
+  --bg-search-focus: #ececec;
+  --bg-detail: #f5f5f5;
+  --bg-bubble: #ffffff;
+  --bg-bubble-me: #95ec69;
+  --bg-bubble-me-text: #1a1a1a;
+  --bg-hover: #f5f5f5;
+  --bg-active: #ececec;
+  --bg-composer: #ffffff;
+  --text-1: #1a1a1a;
+  --text-2: #999999;
+  --text-3: #b3b3b3;
+  --border-1: #e4e4e4;
+  --border-2: #e8e8e8;
+  --scroll: #ddd;
+  --accent: #07c160;
+  --accent-disabled: #d2d2d2;
+  --brand: #ff2442;
+  --link: #1668dc;
+  --interact-bg: rgba(0,0,0,.04);
+  --interact-hover: rgba(0,0,0,.08);
+  --cover-bg: #f0f0f0;
+
   position: fixed; inset: 0; z-index: 2147483000;
   display: flex; flex-direction: column;
-  background: #f2f2f2; color: #1a1a1a;
+  background: var(--bg-app); color: var(--text-1);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 14px; line-height: 1.5;
 }
-#xhs-wx-root button { font-family: inherit; cursor: pointer; border: none; background: none; }
+/* 暗黑主题 */
+#xhs-wx-root.dark {
+  --bg-app: #111111;
+  --bg-top: #1d1d1d;
+  --bg-rail: #191919;
+  --bg-aside: #232323;
+  --bg-search: #2e2e2e;
+  --bg-search-focus: #383838;
+  --bg-detail: #111111;
+  --bg-bubble: #2c2c2c;
+  --bg-bubble-me: #3eb575;
+  --bg-bubble-me-text: #ffffff;
+  --bg-hover: #2a2a2a;
+  --bg-active: #333333;
+  --bg-composer: #2c2c2c;
+  --text-1: #d5d5d5;
+  --text-2: #8a8a8a;
+  --text-3: #6a6a6a;
+  --border-1: #333333;
+  --border-2: #2e2e2e;
+  --scroll: #3a3a3a;
+  --accent: #07c160;
+  --accent-disabled: #3a3a3a;
+  --link: #6ca6e8;
+  --interact-bg: rgba(255,255,255,.07);
+  --interact-hover: rgba(255,255,255,.12);
+  --cover-bg: #2a2a2a;
+}
+#xhs-wx-root button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
 #xhs-wx-root img { display: block; }
 
 /* ---- 顶栏 ---- */
 #xhs-wx-root .wx-top {
   height: 44px; flex: none; display: flex; align-items: center; gap: 10px;
-  padding: 0 14px; background: #2e2e2e; color: #d9d9d9;
+  padding: 0 14px; background: var(--bg-top); color: #d9d9d9;
 }
 #xhs-wx-root .wx-brand { font-weight: 600; font-size: 15px; color: #fff; display: flex; align-items: center; gap: 8px; }
-#xhs-wx-root .wx-brand-dot { width: 8px; height: 8px; border-radius: 50%; background: #ff2442; }
+#xhs-wx-root .wx-brand-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--brand); }
 #xhs-wx-root .wx-top-btn {
   width: 30px; height: 30px; border-radius: 6px; color: #bbb;
   display: inline-flex; align-items: center; justify-content: center;
@@ -136,7 +193,7 @@
 
 /* ---- 导航栏 ---- */
 #xhs-wx-root .wx-navrail {
-  width: 56px; flex: none; background: #2a2a2a;
+  width: 56px; flex: none; background: var(--bg-rail);
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   padding: 12px 0;
 }
@@ -155,111 +212,110 @@
 /* ---- 左栏会话列表 ---- */
 #xhs-wx-root .wx-aside {
   width: 300px; min-width: 220px; max-width: 480px; flex: none;
-  background: #ffffff; border-right: 1px solid #e4e4e4;
+  background: var(--bg-aside); border-right: 1px solid var(--border-1);
   display: flex; flex-direction: column; min-height: 0; position: relative;
 }
 #xhs-wx-root .wx-search { padding: 10px 12px; flex: none; }
 #xhs-wx-root .wx-search input {
   width: 100%; height: 30px; border: none; border-radius: 6px;
-  background: #f2f2f2; padding: 0 12px; font-size: 13px; outline: none; color: #333;
+  background: var(--bg-search); padding: 0 12px; font-size: 13px; outline: none; color: var(--text-1);
 }
-#xhs-wx-root .wx-search input:focus { background: #ececec; }
+#xhs-wx-root .wx-search input:focus { background: var(--bg-search-focus); }
 #xhs-wx-root .wx-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 16px; }
 #xhs-wx-root .wx-list::-webkit-scrollbar { width: 6px; }
-#xhs-wx-root .wx-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 3px; }
+#xhs-wx-root .wx-list::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 3px; }
 
 #xhs-wx-root .wx-item {
   display: flex; gap: 10px; padding: 10px; border-radius: 10px;
   cursor: pointer; align-items: flex-start; position: relative;
 }
-#xhs-wx-root .wx-item:hover { background: #f5f5f5; }
-#xhs-wx-root .wx-item.active { background: #ececec; }
+#xhs-wx-root .wx-item:hover { background: var(--bg-hover); }
+#xhs-wx-root .wx-item.active { background: var(--bg-active); }
 #xhs-wx-root .wx-item-cover {
   width: 58px; height: 58px; border-radius: 6px; object-fit: cover; flex: none;
-  background: #f0f0f0;
+  background: var(--cover-bg);
 }
 #xhs-wx-root .wx-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 #xhs-wx-root .wx-item-title {
-  font-size: 14px; color: #1a1a1a; font-weight: 500;
+  font-size: 14px; color: var(--text-1); font-weight: 500;
   overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
   -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35;
 }
-#xhs-wx-root .wx-item-meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #999; }
+#xhs-wx-root .wx-item-meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
 #xhs-wx-root .wx-item-meta .author { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #xhs-wx-root .wx-item-unread {
-  width: 8px; height: 8px; border-radius: 50%; background: #ff2442;
+  width: 8px; height: 8px; border-radius: 50%; background: var(--brand);
   position: absolute; right: 14px; top: 16px;
 }
-#xhs-wx-root .wx-item-tag {
-  font-size: 11px; color: #ff2442; border: 1px solid currentColor;
-  border-radius: 3px; padding: 0 3px; line-height: 16px; flex: none;
-}
-#xhs-wx-root .wx-empty-list { text-align: center; color: #aaa; padding: 60px 20px; font-size: 13px; }
-#xhs-wx-root .wx-list-loading { text-align: center; color: #bbb; font-size: 12px; padding: 10px 0; }
+#xhs-wx-root .wx-empty-list { text-align: center; color: var(--text-3); padding: 60px 20px; font-size: 13px; }
+#xhs-wx-root .wx-list-loading { text-align: center; color: var(--text-3); font-size: 12px; padding: 10px 0; }
 
 /* ---- 拖拽分隔 ---- */
 #xhs-wx-root .wx-resize-col { width: 4px; flex: none; cursor: col-resize; background: transparent; }
-#xhs-wx-root .wx-resize-col:hover, #xhs-wx-root .wx-resize-col.dragging { background: #07c160; }
+#xhs-wx-root .wx-resize-col:hover, #xhs-wx-root .wx-resize-col.dragging { background: var(--accent); }
 
 /* ---- 右栏详情 ---- */
 #xhs-wx-root .wx-detail {
   flex: 1; min-width: 0; display: flex; flex-direction: column;
-  background: #f5f5f5; min-height: 0;
+  background: var(--bg-detail); min-height: 0;
 }
 #xhs-wx-root .wx-detail-head {
   height: 48px; flex: none; display: flex; align-items: center; gap: 10px;
-  padding: 0 16px; background: #f5f5f5; border-bottom: 1px solid #e8e8e8;
+  padding: 0 16px; background: var(--bg-detail); border-bottom: 1px solid var(--border-2);
 }
 #xhs-wx-root .wx-detail-title {
-  flex: 1; min-width: 0; font-size: 15px; font-weight: 600;
+  flex: 1; min-width: 0; font-size: 15px; font-weight: 600; color: var(--text-1);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #xhs-wx-root .wx-detail-actions { display: flex; align-items: center; gap: 4px; flex: none; }
 #xhs-wx-root .wx-link-btn {
-  height: 30px; padding: 0 12px; border-radius: 6px; color: #555; font-size: 13px;
+  height: 30px; padding: 0 12px; border-radius: 6px; color: var(--text-2); font-size: 13px;
   display: inline-flex; align-items: center; gap: 5px;
 }
-#xhs-wx-root .wx-link-btn:hover { background: #eaeaea; }
-#xhs-wx-root .wx-link-btn.on { color: #ff2442; }
+#xhs-wx-root .wx-link-btn:hover { background: var(--bg-hover); }
+#xhs-wx-root .wx-link-btn.on { color: var(--brand); }
 
 #xhs-wx-root .wx-detail-body {
   flex: 1; min-height: 0; overflow-y: auto; padding: 16px 6% 20px;
 }
 #xhs-wx-root .wx-detail-body::-webkit-scrollbar { width: 8px; }
-#xhs-wx-root .wx-detail-body::-webkit-scrollbar-thumb { background: #ddd; border-radius: 4px; }
+#xhs-wx-root .wx-detail-body::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 4px; }
 
 #xhs-wx-root .wx-empty-detail {
   height: 100%; display: flex; flex-direction: column; gap: 10px;
-  align-items: center; justify-content: center; color: #b3b3b3; font-size: 14px;
+  align-items: center; justify-content: center; color: var(--text-3); font-size: 14px;
 }
 #xhs-wx-root .wx-empty-detail .icon { font-size: 40px; }
-#xhs-wx-root .wx-loading-detail { text-align: center; color: #999; padding: 80px 0; font-size: 13px; }
+#xhs-wx-root .wx-loading-detail { text-align: center; color: var(--text-2); padding: 80px 0; font-size: 13px; }
 
 /* ---- 气泡 ---- */
 #xhs-wx-root .wx-msg { display: flex; gap: 10px; margin-bottom: 18px; }
 #xhs-wx-root .wx-msg.me { flex-direction: row-reverse; }
 #xhs-wx-root .wx-avatar {
-  width: 38px; height: 38px; border-radius: 6px; object-fit: cover; flex: none; background: #e8e8e8;
+  width: 38px; height: 38px; border-radius: 6px; object-fit: cover; flex: none; background: var(--cover-bg);
   cursor: pointer;
 }
 #xhs-wx-root .wx-msg-body { max-width: 62%; display: flex; flex-direction: column; gap: 4px; }
-#xhs-wx-root .wx-msg-name { font-size: 12px; color: #999; padding: 0 2px; }
+#xhs-wx-root .wx-msg-name { font-size: 12px; color: var(--text-2); padding: 0 2px; }
 #xhs-wx-root .wx-msg.me .wx-msg-name { text-align: right; }
 #xhs-wx-root .wx-bubble {
-  background: #ffffff; border-radius: 4px 12px 12px 12px; padding: 10px 12px;
-  font-size: 14px; color: #1a1a1a; word-break: break-word; white-space: pre-wrap;
+  background: var(--bg-bubble); border-radius: 4px 12px 12px 12px; padding: 10px 12px;
+  font-size: 14px; color: var(--text-1); word-break: break-word; white-space: pre-wrap;
   box-shadow: 0 1px 1px rgba(0,0,0,.04);
 }
+#xhs-wx-root.dark .wx-bubble { box-shadow: none; }
 #xhs-wx-root .wx-msg.me .wx-bubble {
-  background: #95ec69; border-radius: 12px 4px 12px 12px;
+  background: var(--bg-bubble-me); border-radius: 12px 4px 12px 12px;
+  color: var(--bg-bubble-me-text);
 }
-#xhs-wx-root .wx-bubble a { color: #1668dc; text-decoration: none; }
-#xhs-wx-root .wx-bubble .wx-tag { color: #1668dc; }
-#xhs-wx-root .wx-bubble-meta { font-size: 12px; color: #aaa; padding: 0 2px; display: flex; gap: 8px; }
+#xhs-wx-root .wx-bubble a { color: var(--link); text-decoration: none; }
+#xhs-wx-root .wx-bubble .wx-tag { color: var(--link); }
+#xhs-wx-root .wx-msg.me .wx-bubble .wx-tag { color: var(--bg-bubble-me-text); }
+#xhs-wx-root .wx-bubble-meta { font-size: 12px; color: var(--text-3); padding: 0 2px; display: flex; gap: 8px; }
 #xhs-wx-root .wx-msg.me .wx-bubble-meta { justify-content: flex-end; }
 #xhs-wx-root .wx-badge {
   display: inline-block; font-size: 11px; line-height: 16px; padding: 0 4px;
-  background: #ff2442; color: #fff; border-radius: 3px; margin-right: 6px;
+  background: var(--brand); color: #fff; border-radius: 3px; margin-right: 6px;
   vertical-align: 1px;
 }
 #xhs-wx-root .wx-bubble-imgs {
@@ -271,60 +327,63 @@
 #xhs-wx-root .wx-bubble-imgs.n7, #xhs-wx-root .wx-bubble-imgs.n8, #xhs-wx-root .wx-bubble-imgs.n9 { grid-template-columns: repeat(3, minmax(0, 155px)); }
 #xhs-wx-root .wx-bubble-imgs img {
   width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 4px;
-  background: #ececec; cursor: zoom-in;
+  background: var(--cover-bg); cursor: zoom-in;
 }
-#xhs-wx-root .wx-bubble-imgs.n1 img { aspect-ratio: auto; max-height: 420px; object-fit: contain; background: #fafafa; }
+#xhs-wx-root .wx-bubble-imgs.n1 img { aspect-ratio: auto; max-height: 420px; object-fit: contain; }
+#xhs-wx-root.dark .wx-bubble-imgs.n1 img { background: #000; }
 
 /* 楼中楼：在父气泡内缩进展示 */
-#xhs-wx-root .wx-subcomments { margin-top: 8px; border-left: 2px solid #ececec; padding-left: 10px; display: flex; flex-direction: column; gap: 8px; }
+#xhs-wx-root .wx-subcomments { margin-top: 8px; border-left: 2px solid var(--border-1); padding-left: 10px; display: flex; flex-direction: column; gap: 8px; }
 #xhs-wx-root .wx-subcomment { font-size: 13px; }
-#xhs-wx-root .wx-subcomment .who { color: #576b95; margin-right: 4px; }
-#xhs-wx-root .wx-subcomment .who.author-tag { color: #ff2442; }
-#xhs-wx-root .wx-subcomment .sub-meta { color: #bbb; font-size: 11px; margin-top: 2px; }
+#xhs-wx-root .wx-subcomment .who { color: var(--link); margin-right: 4px; }
+#xhs-wx-root .wx-subcomment .who.author-tag { color: var(--brand); }
+#xhs-wx-root .wx-subcomment .sub-meta { color: var(--text-3); font-size: 11px; margin-top: 2px; }
 #xhs-wx-root .wx-expand-replies {
-  margin-top: 8px; font-size: 12px; color: #576b95; cursor: pointer; user-select: none;
+  margin-top: 8px; font-size: 12px; color: var(--link); cursor: pointer; user-select: none;
 }
 #xhs-wx-root .wx-expand-replies:hover { opacity: .8; }
 
 /* 分隔提示 */
 #xhs-wx-root .wx-divider {
-  text-align: center; color: #b3b3b3; font-size: 12px; margin: 18px 0;
+  text-align: center; color: var(--text-3); font-size: 12px; margin: 18px 0;
 }
 
 /* 互动栏（笔记气泡下方） */
 #xhs-wx-root .wx-interact {
   display: inline-flex; align-items: center; gap: 4px; margin-top: 8px;
-  padding: 4px 10px; border-radius: 14px; background: rgba(0,0,0,.04);
-  font-size: 12px; color: #888; user-select: none;
+  padding: 4px 10px; border-radius: 14px; background: var(--interact-bg);
+  font-size: 12px; color: var(--text-2); user-select: none;
 }
+#xhs-wx-root .wx-msg.me .wx-interact { background: rgba(0,0,0,.06); color: rgba(0,0,0,.55); }
 #xhs-wx-root .wx-interact .act {
   display: inline-flex; align-items: center; gap: 4px; cursor: pointer; padding: 2px 6px; border-radius: 10px;
 }
-#xhs-wx-root .wx-interact .act:hover { background: rgba(0,0,0,.06); }
-#xhs-wx-root .wx-interact .act.on { color: #ff2442; }
-#xhs-wx-root .wx-interact .sep { color: #ddd; }
+#xhs-wx-root .wx-interact .act:hover { background: var(--interact-hover); }
+#xhs-wx-root .wx-interact .act.on { color: var(--brand); }
+#xhs-wx-root .wx-interact .sep { color: var(--text-3); opacity: .4; }
 
 /* ---- 底部输入 ---- */
-#xhs-wx-root .wx-composer { flex: none; padding: 10px 6% 14px; background: #f5f5f5; }
+#xhs-wx-root .wx-composer { flex: none; padding: 10px 6% 14px; background: var(--bg-detail); }
 #xhs-wx-root .wx-composer-inner {
-  background: #ffffff; border-radius: 10px; padding: 10px 12px;
+  background: var(--bg-composer); border-radius: 10px; padding: 10px 12px;
   box-shadow: 0 1px 2px rgba(0,0,0,.05);
 }
+#xhs-wx-root.dark .wx-composer-inner { box-shadow: none; }
 #xhs-wx-root .wx-input {
   min-height: 44px; max-height: 140px; overflow-y: auto; outline: none;
-  font-size: 14px; color: #1a1a1a; word-break: break-word;
+  font-size: 14px; color: var(--text-1); word-break: break-word;
 }
 /* placeholder 由 JS 维护 .empty 类控制，避免 contenteditable 中 :empty 被 <br> 破坏 */
 #xhs-wx-root .wx-input.empty::before {
-  content: attr(data-placeholder); color: #bbb;
+  content: attr(data-placeholder); color: var(--text-3);
 }
 #xhs-wx-root .wx-composer-bar { display: flex; align-items: center; margin-top: 8px; }
-#xhs-wx-root .wx-composer-tip { font-size: 12px; color: #aaa; flex: 1; }
+#xhs-wx-root .wx-composer-tip { font-size: 12px; color: var(--text-3); flex: 1; }
 #xhs-wx-root .wx-send {
-  height: 30px; padding: 0 18px; border-radius: 6px; background: #07c160;
+  height: 30px; padding: 0 18px; border-radius: 6px; background: var(--accent);
   color: #fff; font-size: 13px; flex: none;
 }
-#xhs-wx-root .wx-send:disabled { background: #d2d2d2; cursor: default; }
+#xhs-wx-root .wx-send:disabled { background: var(--accent-disabled); cursor: default; }
 
 /* ---- 图片查看器 ---- */
 #xhs-wx-root .wx-viewer {
@@ -347,16 +406,17 @@
 
 /* ---- 设置面板 ---- */
 #xhs-wx-root .wx-settings { padding: 18px 18px 30px; overflow-y: auto; }
-#xhs-wx-root .wx-settings h3 { font-size: 14px; color: #1a1a1a; margin: 18px 0 10px; }
+#xhs-wx-root .wx-settings h3 { font-size: 14px; color: var(--text-1); margin: 18px 0 10px; }
 #xhs-wx-root .wx-settings .row {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px;
+  padding: 10px 0; border-bottom: 1px solid var(--border-2); font-size: 13px; color: var(--text-1);
 }
 #xhs-wx-root .wx-settings .row button {
-  height: 28px; padding: 0 14px; border-radius: 6px; background: #07c160; color: #fff; font-size: 12px;
+  height: 28px; padding: 0 14px; border-radius: 6px; background: var(--accent); color: #fff; font-size: 12px;
 }
 #xhs-wx-root .wx-settings .row button.danger { background: #fa5151; }
-#xhs-wx-root .wx-settings .hint { color: #aaa; font-size: 12px; margin-top: 14px; line-height: 1.7; }
+#xhs-wx-root .wx-settings .row button.neutral { background: transparent; border: 1px solid var(--border-1); color: var(--text-2); }
+#xhs-wx-root .wx-settings .hint { color: var(--text-3); font-size: 12px; margin-top: 14px; line-height: 1.7; }
 
 /* ---- toast ---- */
 #xhs-wx-root .wx-toast {
@@ -403,6 +463,26 @@
   function setEnabled(next) {
     storeSet(STORE_KEYS.enabled, next);
     location.reload();
+  }
+
+  function isDark() {
+    return storeGet(STORE_KEYS.dark, false) === true;
+  }
+
+  function applyDark(on) {
+    const rootEl = ensureRoot();
+    rootEl.classList.toggle("dark", on);
+    const btn = rootEl.querySelector("#wx-theme");
+    if (btn) {
+      btn.textContent = on ? "☀" : "🌙";
+      btn.title = on ? "切换为浅色模式" : "切换为暗黑模式";
+    }
+  }
+
+  function toggleDark() {
+    const next = !isDark();
+    storeSet(STORE_KEYS.dark, next);
+    applyDark(next);
   }
 
   function getSeenMap() {
@@ -453,6 +533,7 @@
     el.innerHTML = `
       <header class="wx-top">
         <div class="wx-brand"><span class="wx-brand-dot"></span>小红书 · 微信模式</div>
+        <button type="button" class="wx-top-btn" id="wx-theme" title="切换为暗黑模式">🌙</button>
         <button type="button" class="wx-top-btn" id="wx-refresh" title="刷新列表">
           <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.1-5.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M19.5 5.2v4.3h-4.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -527,6 +608,9 @@
       scanFeed(true);
       toast("已刷新列表", "success");
     });
+
+    // 暗黑模式切换
+    rootEl.querySelector("#wx-theme").addEventListener("click", toggleDark);
 
     // 退出微信模式
     rootEl.querySelector("#wx-exit").addEventListener("click", () => {
@@ -855,7 +939,8 @@
       author: {
         userId: user.userId || "",
         nickname: user.nickname || "",
-        avatar: (user.images && (user.images.avatar || user.images.preview)) || "",
+        // 实测小红书 SSR 数据头像在 user.avatar；兼容旧的 images 结构
+        avatar: user.avatar || (user.images && (user.images.avatar || user.images.preview)) || "",
         homepage: user.userId ? "https://www.xiaohongshu.com/user/profile/" + user.userId : "",
       },
       interact: {
@@ -1011,13 +1096,18 @@
     const dateEl = item.querySelector(".date");
     const likeEl = item.querySelector(".like");
     const avatarImg = authorBox ? authorBox.querySelector("img") : null;
+    // 头像懒加载兜底：src 可能还是占位图，优先取 data-src / src 属性中的真实地址
+    let avatar = "";
+    if (avatarImg) {
+      avatar = avatarImg.getAttribute("data-src") || avatarImg.src || "";
+    }
     // “作者”徽标：author 区域内出现红色小标签文本“作者”
     const isAuthor = !!authorBox && /(^|\s)作者(\s|$)/.test(authorBox.textContent || "");
     return {
       author: name,
       authorUrl: authorHref ? new URL(authorHref, "https://www.xiaohongshu.com").href : "",
       userId: uidFromProfileHref(authorHref),
-      avatar: avatarImg ? avatarImg.src : "",
+      avatar,
       content: contentEl ? contentEl.textContent.trim() : "",
       date: dateEl ? dateEl.textContent.trim() : "",
       likeText: likeEl ? likeEl.textContent.trim() : "",
@@ -1502,6 +1592,7 @@
     wrap.className = "wx-settings";
     wrap.innerHTML = `
       <h3>外观</h3>
+      <div class="row"><span>暗黑模式</span><button class="neutral" id="wx-set-dark">${isDark() ? "当前：暗黑 · 切浅色" : "当前：浅色 · 切暗黑"}</button></div>
       <div class="row"><span>左栏宽度</span><button id="wx-set-width">重置宽度</button></div>
       <div class="row"><span>清除已读记录</span><button id="wx-set-clear-seen">清除</button></div>
       <h3>账号</h3>
@@ -1517,6 +1608,10 @@
     list.innerHTML = "";
     list.appendChild(wrap);
 
+    wrap.querySelector("#wx-set-dark").addEventListener("click", (e) => {
+      toggleDark();
+      e.target.textContent = isDark() ? "当前：暗黑 · 切浅色" : "当前：浅色 · 切暗黑";
+    });
     wrap.querySelector("#wx-set-width").addEventListener("click", () => {
       document.getElementById("wx-aside").style.width = "300px";
       storeSet(STORE_KEYS.leftWidth, 300);
@@ -1555,6 +1650,7 @@
     getMyProfileFromDom();
     ensureRoot();
     applyMyProfileToUi();
+    applyDark(isDark());
     scanFeed(true);
     observeFeed();
     // 首屏 feed 可能渲染较晚，延迟补扫

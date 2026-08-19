@@ -13,11 +13,12 @@
 </head>
 <body>
 <div id="xhs-wx-root">
-  <header class="wx-top">
-    <div class="wx-brand"><span class="wx-brand-dot"></span>小红书 · 微信模式</div>
-    <button type="button" class="wx-top-btn" id="wx-refresh" title="刷新列表">⟳</button>
-    <span class="wx-top-tip">滚动左栏可加载更多笔记</span>
-  </header>
+      <header class="wx-top">
+        <div class="wx-brand"><span class="wx-brand-dot"></span>小红书 · 微信模式</div>
+        <button type="button" class="wx-top-btn" id="wx-theme" title="切换暗黑模式">🌙</button>
+        <button type="button" class="wx-top-btn" id="wx-refresh" title="刷新列表">⟳</button>
+        <span class="wx-top-tip">滚动左栏可加载更多笔记</span>
+      </header>
   <div class="wx-main">
     <nav class="wx-navrail">
       <div class="wx-nav-avatar-wrap" title="我">
@@ -154,5 +155,13 @@
     </section>
   </div>
 </div>
+<script>
+  // 演示用：暗黑模式切换（真实脚本中会持久化到 GM 存储）
+  document.getElementById("wx-theme").addEventListener("click", function () {
+    var root = document.getElementById("xhs-wx-root");
+    var dark = root.classList.toggle("dark");
+    this.textContent = dark ? "☀" : "🌙";
+  });
+</script>
 </body>
 </html>
