@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.1.4
+// @version      0.2.0
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -101,6 +101,13 @@
   function noteIdFromHref(href) {
     const m = /\/(?:explore|discovery\/item)\/([0-9a-f]+)/i.exec(href || "");
     return m ? m[1] : "";
+  }
+
+  // 小红书 CDN 缩放：九宫格加载小图、查看器加载原图（仅对未带处理参数的 URL 生效）
+  function cdnThumb(url, width) {
+    if (!url || !/xhscdn\.com/i.test(url)) return url;
+    if (url.includes("!") || url.includes("?")) return url;
+    return url + "?imageView2/2/w/" + width + "/format/jpg";
   }
 
   /* ============================== 样式 ============================== */
@@ -530,6 +537,42 @@
     } catch (e) { /* 忽略 */ }
   }
 
+  /* ============================== 详情缓存 ============================== */
+
+  // noteId -> { at, videoAt, detail }（含评论）。命中则秒开，跳过 fetch/iframe 等待
+  const detailCache = new Map();
+  const DETAIL_TTL = 10 * 60 * 1000;      // 详情/评论缓存 10 分钟
+  const VIDEO_URL_TTL = 60 * 60 * 1000;   // 视频 URL 带签名，按 1 小时计
+  const DETAIL_CACHE_MAX = 30;
+
+  function cacheGetDetail(noteId) {
+    const hit = detailCache.get(noteId);
+    if (!hit) return null;
+    const fresh = Date.now() - hit.at < DETAIL_TTL;
+    const videoFresh = !hit.detail || !hit.detail.videoUrl || Date.now() - (hit.videoAt || 0) < VIDEO_URL_TTL;
+    if (!fresh || !videoFresh) {
+      detailCache.delete(noteId);
+      return null;
+    }
+    // LRU：命中后移到最新
+    detailCache.delete(noteId);
+    detailCache.set(noteId, hit);
+    return hit.detail;
+  }
+
+  function cachePutDetail(noteId, detail) {
+    if (!detail) return;
+    const prev = detailCache.get(noteId);
+    detailCache.set(noteId, {
+      at: Date.now(),
+      videoAt: prev && prev.detail && prev.detail.videoUrl === detail.videoUrl ? prev.videoAt : Date.now(),
+      detail,
+    });
+    while (detailCache.size > DETAIL_CACHE_MAX) {
+      detailCache.delete(detailCache.keys().next().value);
+    }
+  }
+
   /* ============================== UI 骨架 ============================== */
 
   function ensureRoot() {
@@ -629,11 +672,15 @@
       btn.addEventListener("click", () => switchNav(btn.dataset.tab));
     });
 
-    // 搜索
+    // 搜索（150ms 防抖，避免每个按键都全量重建列表）
     const filterInput = rootEl.querySelector("#wx-filter");
+    let filterTimer = null;
     filterInput.addEventListener("input", () => {
-      state.keyword = filterInput.value.trim().toLowerCase();
-      renderList();
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        state.keyword = filterInput.value.trim().toLowerCase();
+        renderList();
+      }, 150);
     });
 
     // 列表滚动到底 -> 驱动原页面加载更多 feed
@@ -668,6 +715,9 @@
     // 顶栏点赞/收藏按钮
     rootEl.querySelector("#wx-like-toggle").addEventListener("click", () => actInteract("like"));
     rootEl.querySelector("#wx-collect-toggle").addEventListener("click", () => actInteract("collect"));
+
+    // 详情区事件委托（一次性）
+    bindDetailEventsOnce(rootEl);
   }
 
   function bindResize(rootEl) {
@@ -717,6 +767,8 @@
     const items = document.querySelectorAll(".note-item");
     const added = [];
     for (const item of items) {
+      if (!force && scannedItems.has(item)) continue;
+      scannedItems.add(item);
       const note = parseNoteItem(item);
       if (!note || !note.noteId) continue;
       if (!state.notesIndex.has(note.noteId)) {
@@ -775,12 +827,35 @@
     }
   }
 
+  // 已解析过的卡片元素（WeakSet 增量扫描，避免重复 parse）
+  const scannedItems = new WeakSet();
+
+  // 观察器：优先盯 feed 容器本身；回调防抖，只做增量扫描
+  let scanDebounceTimer = null;
   function observeFeed() {
+    const target = document.querySelector(".feeds-container") || document.body;
     const mo = new MutationObserver(() => {
-      scanFeed(false);
+      if (scanDebounceTimer) return;
+      scanDebounceTimer = setTimeout(() => {
+        scanDebounceTimer = null;
+        scanFeed(false);
+      }, 150);
     });
-    mo.observe(document.body, { childList: true, subtree: true });
-    log("MutationObserver 已启动");
+    mo.observe(target, { childList: true, subtree: true });
+    // 容器兜底：若 React 重建了 feed 容器（observer 失效），通过 body 级观察自愈
+    if (target !== document.body) {
+      const guard = new MutationObserver(() => {
+        const fresh = document.querySelector(".feeds-container");
+        if (fresh && fresh !== target) {
+          guard.disconnect();
+          mo.disconnect();
+          observeFeed();
+          scanFeed(false);
+        }
+      });
+      guard.observe(document.body, { childList: true, subtree: false });
+    }
+    log("MutationObserver 已启动，观察目标：", target === document.body ? "body" : ".feeds-container");
   }
 
   // 驱动原页面滚动，触发小红书 feed 无限加载
@@ -1165,21 +1240,31 @@
     markNoteSeen(note);
     updateListItemState(note); // 增量更新高亮与未读点，不重建列表
     const rootEl = ensureRoot();
-    const body = rootEl.querySelector("#wx-detail-body");
     const composer = rootEl.querySelector("#wx-composer");
     const titleEl = rootEl.querySelector("#wx-detail-title");
     const openBtn = rootEl.querySelector("#wx-open-origin");
-    const likeBtn = rootEl.querySelector("#wx-like-toggle");
-    const collectBtn = rootEl.querySelector("#wx-collect-toggle");
 
     titleEl.textContent = note.title;
     openBtn.href = note.url;
     composer.hidden = false;
-    body.innerHTML = `<div class="wx-loading-detail">正在加载笔记与评论…</div>`;
-    likeBtn.hidden = true;
-    collectBtn.hidden = true;
 
-    // 正文与评论并行：SSR fetch 很快先画正文，iframe 到位后补评论
+    // 缓存命中：直接渲染正文+评论，秒开（iframe 仍后台预热以便互动操作）
+    const cached = cacheGetDetail(note.noteId);
+    if (cached) {
+      state.activeDetail = cached;
+      renderDetailShell();
+      renderCommentsInto();
+      updateInteractButtons();
+      loadNoteInFrame(note, { waitComments: false }).catch(() => {}); // 后台预热，不阻塞
+      return;
+    }
+
+    const body = rootEl.querySelector("#wx-detail-body");
+    body.innerHTML = `<div class="wx-loading-detail">正在加载笔记与评论…</div>`;
+    rootEl.querySelector("#wx-like-toggle").hidden = true;
+    rootEl.querySelector("#wx-collect-toggle").hidden = true;
+
+    // 正文与评论并行：SSR fetch 快，先画正文；iframe 到位后只更新评论区
     let detail = null;
     try {
       detail = await fetchNoteDetail(note);
@@ -1189,31 +1274,73 @@
 
     // 若已切换笔记则放弃渲染
     if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
-    state.activeDetail = { ...detail, comments: [] };
-    renderDetailBody(true);
+    state.activeDetail = { ...(detail || {}), comments: [], commentError: detail ? "" : "正文加载失败，正在从页面重试…" };
+    renderDetailShell();
 
-    // iframe：评论 + 互动操作载体
+    // iframe：评论 + 互动操作载体 + 正文兜底
     try {
       const { doc } = await loadNoteInFrame(note, { waitComments: true });
       if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
+      // SSR 失败时从 iframe DOM 兜底解析正文
+      if (!detail || !detail.desc) {
+        const fallback = parseNoteFromFrameDoc(doc);
+        if (fallback) {
+          state.activeDetail = { ...fallback, ...state.activeDetail, comments: state.activeDetail.comments };
+          renderDetailShell(); // 重画一次正文（仅失败兜底场景）
+        }
+      }
       // 用 iframe 里的实时数据修正互动状态（点赞状态 SSR 里拿到的可能不准）
       const frameState = extractFrameState(doc);
       const parsed = parseComments(doc);
-      state.activeDetail = {
-        ...state.activeDetail,
-        comments: parsed.comments,
-        totalText: parsed.totalText,
-        interact: frameState.interact || state.activeDetail.interact,
-      };
-      renderDetailBody(false);
+      state.activeDetail.comments = parsed.comments;
+      state.activeDetail.totalText = parsed.totalText;
+      state.activeDetail.commentError = "";
+      if (frameState.interact) {
+        state.activeDetail.interact = { ...state.activeDetail.interact, ...frameState.interact };
+      }
+      renderCommentsInto(); // 只更新评论区，正文图片不重载
       updateInteractButtons();
+      cachePutDetail(note.noteId, state.activeDetail);
       log("评论加载完成：", parsed.comments.length, "条一级评论");
     } catch (e) {
       warn("评论加载失败", e);
       if (state.activeNote && state.activeNote.noteId === note.noteId) {
         state.activeDetail.commentError = e.message;
-        renderDetailBody(false);
+        renderCommentsInto();
       }
+    }
+  }
+
+  // SSR 失败时从 iframe 渲染结果兜底解析正文（尽力而为）
+  function parseNoteFromFrameDoc(doc) {
+    try {
+      const titleEl = doc.querySelector("#detail-desc .title, .note-content .title");
+      const descEl = doc.querySelector("#detail-desc .desc, .note-content .desc");
+      const userEl = doc.querySelector(".author-container .username, .author-container a");
+      const avatarEl = doc.querySelector(".author-container img");
+      const dateEl = doc.querySelector(".author-container .date, #detail-desc .date");
+      if (!titleEl && !descEl && !userEl) return null;
+      const imgs = [...doc.querySelectorAll(".media-container img")]
+        .map((i) => i.src || i.getAttribute("data-src") || "")
+        .filter(Boolean)
+        .map((u) => u.replace(/^http:\/\//i, "https://"));
+      const userHref = userEl ? userEl.getAttribute("href") || "" : "";
+      return {
+        title: titleEl ? titleEl.textContent.trim() : "",
+        desc: descEl ? descEl.textContent.trim() : "",
+        author: {
+          nickname: userEl ? userEl.textContent.trim() : "",
+          avatar: avatarEl ? avatarEl.src.replace(/^http:\/\//i, "https://") : "",
+          userId: uidFromProfileHref(userHref),
+        },
+        images: imgs,
+        tagList: [],
+        interact: {},
+        ipLocation: dateEl ? dateEl.textContent.trim() : "",
+        time: 0,
+      };
+    } catch (e) {
+      return null;
     }
   }
 
@@ -1251,7 +1378,10 @@
       ? `<video class="wx-bubble-video" controls preload="metadata" playsinline src="${escapeHtml(detail.videoUrl)}"${images[0] ? ` poster="${escapeHtml(images[0])}"` : ""}></video>`
       : images.length
       ? `<div class="wx-bubble-imgs n${Math.min(images.length, 9)}" data-imgs>${images
-          .map((u) => `<img loading="lazy" src="${escapeHtml(u)}" data-viewer alt=""/>`)
+          .map(
+            (u) =>
+              `<img loading="lazy" src="${escapeHtml(cdnThumb(u, 480))}" data-full="${escapeHtml(u)}" data-viewer alt=""/>`
+          )
           .join("")}</div>`
       : "";
 
@@ -1316,18 +1446,27 @@
     `;
   }
 
-  function renderDetailBody(loadingComments) {
+  // 渲染详情骨架（正文气泡 + 评论占位容器）。评论到位后只更新评论区，避免正文图片重载
+  function renderDetailShell() {
     const rootEl = ensureRoot();
     const body = rootEl.querySelector("#wx-detail-body");
     const detail = state.activeDetail;
     if (!detail) return;
+    body.innerHTML = noteHtml(detail) + `<div id="wx-comments"></div>`;
+    body.scrollTop = 0;
+  }
+
+  // 只更新评论区（正文不动，滚动位置不动）
+  function renderCommentsInto() {
+    const rootEl = ensureRoot();
+    const box = rootEl.querySelector("#wx-comments");
+    const detail = state.activeDetail;
+    if (!box || !detail) return;
 
     const parts = [];
-    parts.push(noteHtml(detail));
-
     if (detail.commentError) {
       parts.push(`<div class="wx-divider">评论加载失败：${escapeHtml(detail.commentError)}</div>`);
-    } else if (loadingComments) {
+    } else if (!detail.comments) {
       parts.push(`<div class="wx-divider">评论加载中…</div>`);
     } else {
       const total = detail.totalText || `共 ${detail.comments.length} 条评论`;
@@ -1337,32 +1476,27 @@
         parts.push(`<div class="wx-divider">还没有评论，抢首评</div>`);
       }
     }
-
-    body.innerHTML = parts.join("");
-    body.scrollTop = 0;
-
-    // 事件绑定：图片查看器 / 互动 / 展开楼中楼
-    bindDetailEvents(body);
-    updateInteractButtons();
+    box.innerHTML = parts.join("");
   }
 
-  function bindDetailEvents(body) {
-    // 图片查看
-    body.querySelectorAll("[data-imgs] img[data-viewer]").forEach((img) => {
-      img.addEventListener("click", () => {
-        const urls = [...img.closest("[data-imgs]").querySelectorAll("img")]
-          .map((el) => el.getAttribute("src"))
-          .filter(Boolean);
-        openImageViewer(urls.indexOf(img.getAttribute("src")), urls);
-      });
-    });
-    // 气泡内互动
-    body.querySelectorAll("[data-interact] .act").forEach((act) => {
-      act.addEventListener("click", () => actInteract(act.dataset.act));
-    });
-    // 展开楼中楼
-    body.querySelectorAll("[data-more]").forEach((el) => {
-      el.addEventListener("click", () => expandReplies(el));
+  // 详情区事件委托：只绑定一次（在 bindRootEvents 中调用），替代逐条 addEventListener
+  function bindDetailEventsOnce(rootEl) {
+    const body = rootEl.querySelector("#wx-detail-body");
+    body.addEventListener("click", (e) => {
+      const img = e.target.closest("img[data-viewer]");
+      if (img) {
+        const group = [...img.closest("[data-imgs]").querySelectorAll("img")];
+        const urls = group.map((el) => el.getAttribute("data-full") || el.getAttribute("src")).filter(Boolean);
+        openImageViewer(urls.indexOf(img.getAttribute("data-full") || img.getAttribute("src")), urls);
+        return;
+      }
+      const act = e.target.closest("[data-interact] .act[data-act]");
+      if (act) {
+        actInteract(act.dataset.act);
+        return;
+      }
+      const more = e.target.closest("[data-more]");
+      if (more) expandReplies(more);
     });
   }
 
@@ -1463,7 +1597,7 @@
   async function expandReplies(el) {
     const note = state.activeNote;
     if (!note) return;
-    el.textContent = "展开中…";
+    el.textContent = "展开全部回复中…（会展开所有楼中楼）";
     const frame = document.getElementById("xhs-wx-engine");
     const doc = frame && frame.contentDocument;
     if (!doc) {
@@ -1480,15 +1614,15 @@
     }
     if (!clicked) {
       toast("没有可展开的回复", "info");
-      renderDetailBody(false);
       return;
     }
     await sleep(1200);
     const parsed = parseComments(doc);
     if (state.activeDetail) {
       state.activeDetail.comments = parsed.comments;
-      renderDetailBody(false);
-      toast("已展开回复", "success");
+      renderCommentsInto();
+      cachePutDetail(note.noteId, state.activeDetail);
+      toast("已展开全部回复", "success");
     }
   }
 
@@ -1547,7 +1681,8 @@
       const parsed = parseComments(doc);
       if (state.activeDetail) {
         state.activeDetail.comments = parsed.comments;
-        renderDetailBody(false);
+        renderCommentsInto();
+        cachePutDetail(note.noteId, state.activeDetail);
       }
       input.textContent = "";
       input.dispatchEvent(new Event("input", { bubbles: true }));
