@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>小红书微信模式 · UI 预览</title>
+<link rel="stylesheet" href="demo.css" />
+<style>
+  body { margin: 0; }
+  .demo-img-1 { background: linear-gradient(135deg, #fbc2eb 0%, #a6c1ee 100%); }
+  .demo-img-2 { background: linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%); }
+  .demo-img-3 { background: linear-gradient(135deg, #fddb92 0%, #d1fdff 100%); }
+</style>
+</head>
+<body>
+<div id="xhs-wx-root">
+  <header class="wx-top">
+    <div class="wx-brand"><span class="wx-brand-dot"></span>小红书 · 微信模式</div>
+    <button type="button" class="wx-top-btn" id="wx-refresh" title="刷新列表">⟳</button>
+    <span class="wx-top-tip">滚动左栏可加载更多笔记</span>
+  </header>
+  <div class="wx-main">
+    <nav class="wx-navrail">
+      <div class="wx-nav-avatar-wrap" title="我">
+        <img class="wx-nav-avatar" alt="我" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='34' height='34'%3E%3Crect width='34' height='34' rx='8' fill='%23999'/%3E%3C/svg%3E" />
+      </div>
+      <button type="button" class="wx-nav-btn active" data-tab="chat" title="笔记">💬</button>
+      <button type="button" class="wx-nav-btn" data-tab="settings" title="设置">☰</button>
+      <div class="wx-nav-spacer"></div>
+      <button type="button" class="wx-nav-btn" id="wx-exit" title="切回原版界面">⏏</button>
+    </nav>
+    <aside class="wx-aside" id="wx-aside">
+      <div class="wx-search">
+        <input id="wx-filter" type="search" placeholder="搜索标题 / 作者" autocomplete="off" />
+      </div>
+      <div class="wx-list" id="wx-list">
+        <div class="wx-item active">
+          <div class="wx-item-cover demo-img-1"></div>
+          <div class="wx-item-main">
+            <div class="wx-item-title">Nuphy盲盒第二弹安全下车，键盘开箱体验分享</div>
+            <div class="wx-item-meta"><span class="author">不是周处</span><span class="likes">♥ 8732</span></div>
+          </div>
+        </div>
+        <div class="wx-item">
+          <div class="wx-item-cover demo-img-2"></div>
+          <div class="wx-item-main">
+            <div class="wx-item-title">第一次看到真美女，家人们谁懂啊</div>
+            <div class="wx-item-meta"><span class="author">大耳朵星星</span><span class="likes">♥ 3.1万</span></div>
+          </div>
+          <span class="wx-item-unread"></span>
+        </div>
+        <div class="wx-item">
+          <div class="wx-item-cover demo-img-3"></div>
+          <div class="wx-item-main">
+            <div class="wx-item-title">杭州之江｜别人吐槽的弯路，是我最爱的生活方式</div>
+            <div class="wx-item-meta"><span class="author">建筑师严选好房CC</span><span class="likes">♥ 11</span></div>
+          </div>
+        </div>
+        <div class="wx-item">
+          <div class="wx-item-cover demo-img-1"></div>
+          <div class="wx-item-main">
+            <div class="wx-item-title">给弱鸡体质开始健身的实用性建议（新手必看）</div>
+            <div class="wx-item-meta"><span class="author">蹦蹦财</span><span class="likes">♥ 2.1万</span></div>
+          </div>
+          <span class="wx-item-unread"></span>
+        </div>
+      </div>
+    </aside>
+    <div class="wx-resize-col"></div>
+    <section class="wx-detail">
+      <div class="wx-detail-head">
+        <div class="wx-detail-title">Nuphy盲盒第二弹安全下车</div>
+        <div class="wx-detail-actions">
+          <button type="button" class="wx-link-btn on">♥ 已赞 8732</button>
+          <button type="button" class="wx-link-btn">☆ 收藏 431</button>
+          <a class="wx-link-btn" href="#">原页</a>
+        </div>
+      </div>
+      <div class="wx-detail-body">
+        <div class="wx-msg">
+          <div class="wx-avatar demo-img-2"></div>
+          <div class="wx-msg-body">
+            <div class="wx-msg-name">不是周处</div>
+            <div class="wx-bubble">
+              <div style="font-weight:600;margin-bottom:4px">Nuphy盲盒第二弹安全下车</div>
+              <div>下单前许愿不中Node骚粉，看到1.05心凉了半截。幸好安全下车了 ——— 二编：清库存还是真盲盒我也想知道，既然已经有通过重量尺寸判断会出什么，提供个样本统计一下自然就清楚了。 <a class="wx-tag" href="#">#Nuphy</a> <a class="wx-tag" href="#">#机械键盘</a></div>
+              <div class="wx-bubble-imgs n3">
+                <div class="demo-img-1" style="aspect-ratio:1/1;border-radius:4px"></div>
+                <div class="demo-img-2" style="aspect-ratio:1/1;border-radius:4px"></div>
+                <div class="demo-img-3" style="aspect-ratio:1/1;border-radius:4px"></div>
+              </div>
+              <div class="wx-interact">
+                <span class="act on">♥ <span class="n">8732</span></span><span class="sep">|</span>
+                <span class="act">★ <span class="n">431</span></span><span class="sep">|</span>
+                <span class="act">💬 <span class="n">44</span></span>
+              </div>
+            </div>
+            <div class="wx-bubble-meta"><span>3天前 · 贵州</span></div>
+          </div>
+        </div>
+
+        <div class="wx-divider">共 44 条评论</div>
+
+        <div class="wx-msg">
+          <div class="wx-avatar demo-img-3"></div>
+          <div class="wx-msg-body">
+            <div class="wx-msg-name">for her.</div>
+            <div class="wx-bubble">node100仅拆封有人换吗</div>
+            <div class="wx-bubble-meta"><span>2天前 辽宁</span><span>♥ 3</span></div>
+          </div>
+        </div>
+
+        <div class="wx-msg">
+          <div class="wx-avatar demo-img-1"></div>
+          <div class="wx-msg-body">
+            <div class="wx-msg-name">ZZZ</div>
+            <div class="wx-bubble">那你得有点耐心才能换出去了，🐟上大把的未拆封没人要，你这个大佩列、雷霆粉还拆开了就更难出手一点
+              <div class="wx-subcomments">
+                <div class="wx-subcomment"><div><span class="who author-tag">不是周处</span>作者回复：耐心等吧，总会出的</div><div class="sub-meta">2天前 · ♥ 2</div></div>
+                <div class="wx-subcomment"><div><span class="who">路人甲</span>蹲一个后续</div><div class="sub-meta">1天前</div></div>
+                <div class="wx-expand-replies">展开 2 条回复 ↧</div>
+              </div>
+            </div>
+            <div class="wx-bubble-meta"><span>2天前 河北</span><span>♥ 1</span></div>
+          </div>
+        </div>
+
+        <div class="wx-msg me">
+          <div class="wx-avatar demo-img-2"></div>
+          <div class="wx-msg-body">
+            <div class="wx-msg-name">我</div>
+            <div class="wx-bubble">这波盲盒确实香，我也想冲一个</div>
+            <div class="wx-bubble-meta"><span>昨天 21:30</span></div>
+          </div>
+        </div>
+
+        <div class="wx-msg">
+          <div class="wx-avatar demo-img-3"></div>
+          <div class="wx-msg-body">
+            <div class="wx-msg-name"><span class="wx-badge">作者</span>不是周处</div>
+            <div class="wx-bubble">矮轴，不是Node就是AirV2</div>
+            <div class="wx-bubble-meta"><span>3天前 贵州</span><span>♥ 6</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="wx-composer">
+        <div class="wx-composer-inner">
+          <div class="wx-input" contenteditable="true" data-placeholder="评论一下…"></div>
+          <div class="wx-composer-bar">
+            <span class="wx-composer-tip"></span>
+            <button type="button" class="wx-send">发送</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+</body>
+</html>
