@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.2.1
+// @version      0.2.2
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -522,19 +522,42 @@
 
   function getMyProfileFromDom() {
     try {
-      // 侧边栏"我"的入口：最后一个指向 /user/profile/ 的侧栏链接
+      // 仅信任侧边栏容器内的"我"入口；feed 卡片的作者链接一律不作为身份来源
       const links = document.querySelectorAll('a[href*="/user/profile/"]');
-      let mine = null;
       for (const a of links) {
-        if (a.closest(".side-bar-component, .side-bar, nav, .user")) mine = a;
-      }
-      if (!mine && links.length) mine = links[links.length - 1];
-      if (mine) {
-        state.myUserId = uidFromProfileHref(mine.getAttribute("href")) || state.myUserId;
-        const img = mine.querySelector("img");
-        if (img) state.myAvatar = img.src || state.myAvatar;
+        const box = a.closest(".side-bar-component, .side-bar, nav, .user-side, .side");
+        if (!box) continue;
+        state.myUserId = uidFromProfileHref(a.getAttribute("href")) || state.myUserId;
+        const img = a.querySelector("img") || box.querySelector("img");
+        if (img && img.src) state.myAvatar = img.src;
+        const nameEl = a.querySelector(".name, .nickname, span");
+        if (nameEl && nameEl.textContent.trim()) state.myNickname = nameEl.textContent.trim();
+        break;
       }
     } catch (e) { /* 忽略 */ }
+  }
+
+  // 从笔记页 SSR 数据提取当前登录用户（最可靠的身份来源；登录后 userInfo 才有值）
+  function extractMyProfileFromState(stateJson) {
+    try {
+      const u = stateJson && stateJson.user;
+      if (!u || !u.loggedIn) return false;
+      const info = u.userInfo;
+      if (!info || !info.userId) return false;
+      state.myUserId = info.userId;
+      if (info.nickname) state.myNickname = info.nickname;
+      let avatar = info.avatar || "";
+      if (!avatar && Array.isArray(info.images) && info.images.length) {
+        const first = info.images[0] || {};
+        avatar = first.url || (first.infoList && first.infoList.length ? first.infoList[first.infoList.length - 1].url : "") || "";
+      } else if (!avatar && info.images && info.images.avatar) {
+        avatar = info.images.avatar;
+      }
+      if (avatar) state.myAvatar = avatar.replace(/^http:\/\//i, "https://");
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   /* ============================== 详情缓存 ============================== */
@@ -994,6 +1017,8 @@
     }
     const detailMap = stateJson && stateJson.note && stateJson.note.noteDetailMap;
     if (!detailMap) throw new Error("noteDetailMap 不存在");
+    // 顺带提取当前登录用户身份（修正导航栏头像与"我的评论"判断）
+    if (extractMyProfileFromState(stateJson)) applyMyProfileToUi();
     // 优先精确匹配，否则取第一个
     const entry = detailMap[note.noteId] || Object.values(detailMap)[0];
     const nd = entry && entry.note;
