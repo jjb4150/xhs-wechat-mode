@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.2.2
+// @version      0.2.3
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -522,17 +522,15 @@
 
   function getMyProfileFromDom() {
     try {
-      // 仅信任侧边栏容器内的"我"入口；feed 卡片的作者链接一律不作为身份来源
-      const links = document.querySelectorAll('a[href*="/user/profile/"]');
-      for (const a of links) {
-        const box = a.closest(".side-bar-component, .side-bar, nav, .user-side, .side");
-        if (!box) continue;
-        state.myUserId = uidFromProfileHref(a.getAttribute("href")) || state.myUserId;
-        const img = a.querySelector("img") || box.querySelector("img");
-        if (img && img.src) state.myAvatar = img.src;
-        const nameEl = a.querySelector(".name, .nickname, span");
-        if (nameEl && nameEl.textContent.trim()) state.myNickname = nameEl.textContent.trim();
-        break;
+      // 侧边栏真实容器为 .channel-list-content（实测），"我"的入口是其内的 /user/profile/ 链接
+      const link = document.querySelector('.channel-list-content a[href*="/user/profile/"]');
+      if (link) {
+        state.myUserId = uidFromProfileHref(link.getAttribute("href")) || state.myUserId;
+        const img = link.querySelector("img");
+        if (img && (img.src || img.getAttribute("data-src"))) {
+          state.myAvatar = (img.getAttribute("data-src") || img.src).replace(/^http:\/\//i, "https://");
+        }
+        log("侧边栏身份：", state.myUserId, state.myNickname || "");
       }
     } catch (e) { /* 忽略 */ }
   }
@@ -541,9 +539,11 @@
   function extractMyProfileFromState(stateJson) {
     try {
       const u = stateJson && stateJson.user;
-      if (!u || !u.loggedIn) return false;
+      if (!u || !u.userInfo || !u.userInfo.userId) {
+        log("SSR 身份提取：未取到 userInfo（loggedIn=", u && u.loggedIn, "）");
+        return false;
+      }
       const info = u.userInfo;
-      if (!info || !info.userId) return false;
       state.myUserId = info.userId;
       if (info.nickname) state.myNickname = info.nickname;
       let avatar = info.avatar || "";
@@ -554,8 +554,10 @@
         avatar = info.images.avatar;
       }
       if (avatar) state.myAvatar = avatar.replace(/^http:\/\//i, "https://");
+      log("SSR 身份提取成功：", info.userId, info.nickname || "");
       return true;
     } catch (e) {
+      warn("SSR 身份提取异常", e);
       return false;
     }
   }
@@ -2002,9 +2004,17 @@
     applyDark(isDark());
     scanFeed(true);
     observeFeed();
-    // 首屏 feed 可能渲染较晚，延迟补扫
-    setTimeout(() => scanFeed(false), 1500);
-    setTimeout(() => scanFeed(false), 4000);
+    // 首屏 feed / 侧边栏"我"可能渲染较晚，延迟补扫补身份
+    setTimeout(() => {
+      scanFeed(false);
+      getMyProfileFromDom();
+      applyMyProfileToUi();
+    }, 1500);
+    setTimeout(() => {
+      scanFeed(false);
+      getMyProfileFromDom();
+      applyMyProfileToUi();
+    }, 4000);
     log("微信模式已启动");
   }
 
