@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.1.3
+// @version      0.1.4
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -1675,6 +1675,40 @@
     return location.pathname === "/explore" || location.pathname === "/" || location.pathname === "";
   }
 
+  // 退出微信模式后，在原页面右下角挂一个悬浮球，点击即可重新进入
+  function mountReentryButton() {
+    if (document.getElementById("xhs-wx-reentry")) return;
+    const btn = document.createElement("div");
+    btn.id = "xhs-wx-reentry";
+    btn.textContent = "微信";
+    btn.title = "进入小红书微信模式";
+    Object.assign(btn.style, {
+      position: "fixed",
+      right: "20px",
+      bottom: "20px",
+      zIndex: "2147483000",
+      width: "46px",
+      height: "46px",
+      borderRadius: "50%",
+      background: "#07c160",
+      color: "#fff",
+      fontSize: "12px",
+      fontWeight: "600",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      boxShadow: "0 2px 10px rgba(0,0,0,.3)",
+      userSelect: "none",
+    });
+    btn.addEventListener("click", () => {
+      storeSet(STORE_KEYS.enabled, true);
+      location.reload();
+    });
+    (document.body || document.documentElement).appendChild(btn);
+    log("已挂载微信模式重入悬浮球");
+  }
+
   function applyMyProfileToUi() {
     const rootEl = ensureRoot();
     const avatar = rootEl.querySelector("#wx-my-avatar");
@@ -1683,12 +1717,14 @@
   }
 
   function boot() {
-    if (!isEnabled()) {
-      log("微信模式已停用，可通过油猴菜单启用");
-      return;
-    }
     if (!isFeedPage()) {
       log("非 feed 页面，跳过启动：" + location.pathname);
+      return;
+    }
+    if (!isEnabled()) {
+      // 已退出：挂悬浮球方便随时回来（也可用油猴菜单切换）
+      mountReentryButton();
+      log("微信模式已停用（右下角悬浮球或油猴菜单可重新启用）");
       return;
     }
     injectCss();
