@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.1.1
+// @version      0.1.2
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -1095,11 +1095,13 @@
     const contentEl = item.querySelector(".content");
     const dateEl = item.querySelector(".date");
     const likeEl = item.querySelector(".like");
-    const avatarImg = authorBox ? authorBox.querySelector("img") : null;
-    // 头像懒加载兜底：src 可能还是占位图，优先取 data-src / src 属性中的真实地址
+    // 评论头像实际结构为 .comment-item > .avatar > img（.avatar 与 .author 是兄弟节点）
+    const avatarImg =
+      item.querySelector(".avatar img") ||
+      (authorBox && authorBox.querySelector("img"));
     let avatar = "";
     if (avatarImg) {
-      avatar = avatarImg.getAttribute("data-src") || avatarImg.src || "";
+      avatar = avatarImg.getAttribute("src") || avatarImg.getAttribute("data-src") || "";
     }
     // “作者”徽标：author 区域内出现红色小标签文本“作者”
     const isAuthor = !!authorBox && /(^|\s)作者(\s|$)/.test(authorBox.textContent || "");
