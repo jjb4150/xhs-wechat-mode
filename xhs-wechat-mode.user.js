@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.1.2
+// @version      0.1.3
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -331,6 +331,13 @@
 }
 #xhs-wx-root .wx-bubble-imgs.n1 img { aspect-ratio: auto; max-height: 420px; object-fit: contain; }
 #xhs-wx-root.dark .wx-bubble-imgs.n1 img { background: #000; }
+
+/* 视频播放器（笔记气泡内） */
+#xhs-wx-root .wx-bubble-video {
+  display: block; width: 100%; max-width: 420px; max-height: 480px;
+  border-radius: 6px; background: #000; margin-top: 6px;
+}
+#xhs-wx-root .wx-msg.me .wx-bubble-video { background: #000; }
 
 /* 楼中楼：在父气泡内缩进展示 */
 #xhs-wx-root .wx-subcomments { margin-top: 8px; border-left: 2px solid var(--border-1); padding-left: 10px; display: flex; flex-direction: column; gap: 8px; }
@@ -922,10 +929,43 @@
   function normalizeNoteData(nd) {
     const user = nd.user || {};
     const interact = nd.interactInfo || {};
+    // 图片列表：图文笔记字段为 url/infoList；视频笔记封面字段为 urlDefault/urlPre
     const images = [];
     for (const img of nd.imageList || []) {
-      const url = img.url || (img.infoList && img.infoList.length && img.infoList[img.infoList.length - 1].url) || "";
-      if (url) images.push(url);
+      const url =
+        img.url ||
+        img.urlDefault ||
+        img.urlPre ||
+        (img.infoList && img.infoList.length && img.infoList[img.infoList.length - 1].url) ||
+        "";
+      if (url) images.push(url.replace(/^http:\/\//i, "https://"));
+    }
+    // 视频播放地址：video.media.stream.h264[0].masterUrl（驼峰字段）；h264 兼容性最好
+    let videoUrl = "";
+    if (nd.type === "video" && nd.video && nd.video.media && nd.video.media.stream) {
+      const streams = nd.video.media.stream;
+      const candidates = streams.h264 || streams.h265 || [];
+      for (const it of candidates) {
+        const u = it.masterUrl || (it.backupUrls && it.backupUrls[0]) || "";
+        if (u) {
+          videoUrl = u.replace(/^http:\/\//i, "https://");
+          break;
+        }
+      }
+      if (!videoUrl) {
+        // 兜底：所有编码里逐个找
+        for (const codec of Object.values(streams)) {
+          if (!Array.isArray(codec)) continue;
+          for (const it of codec) {
+            const u = it.masterUrl || (it.backupUrls && it.backupUrls[0]) || "";
+            if (u) {
+              videoUrl = u.replace(/^http:\/\//i, "https://");
+              break;
+            }
+          }
+          if (videoUrl) break;
+        }
+      }
     }
     return {
       noteId: nd.noteId,
@@ -936,6 +976,7 @@
       time: nd.time || 0,
       ipLocation: nd.ipLocation || "",
       images,
+      videoUrl,
       author: {
         userId: user.userId || "",
         nickname: user.nickname || "",
@@ -1206,7 +1247,9 @@
       .join(" ");
 
     const images = detail.images || [];
-    const imgsHtml = images.length
+    const mediaHtml = detail.videoUrl
+      ? `<video class="wx-bubble-video" controls preload="metadata" playsinline src="${escapeHtml(detail.videoUrl)}"${images[0] ? ` poster="${escapeHtml(images[0])}"` : ""}></video>`
+      : images.length
       ? `<div class="wx-bubble-imgs n${Math.min(images.length, 9)}" data-imgs>${images
           .map((u) => `<img loading="lazy" src="${escapeHtml(u)}" data-viewer alt=""/>`)
           .join("")}</div>`
@@ -1220,7 +1263,7 @@
           <div class="wx-bubble">
             ${detail.title ? `<div style="font-weight:600;margin-bottom:4px">${escapeHtml(detail.title)}</div>` : ""}
             <div>${escapeHtml(detail.desc || (detail.title ? "" : "（无正文）"))}${tagsHtml ? " " + tagsHtml : ""}</div>
-            ${imgsHtml}
+            ${mediaHtml}
             <div class="wx-interact" data-interact>
               <span class="act ${interact.liked ? "on" : ""}" data-act="like" title="点赞">♥ <span class="n">${escapeHtml(fmtCount(interact.likedCount) || "0")}</span></span>
               <span class="sep">|</span>

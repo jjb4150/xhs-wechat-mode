@@ -225,6 +225,13 @@
 #xhs-wx-root .wx-bubble-imgs.n1 img { aspect-ratio: auto; max-height: 420px; object-fit: contain; }
 #xhs-wx-root.dark .wx-bubble-imgs.n1 img { background: #000; }
 
+/* 视频播放器（笔记气泡内） */
+#xhs-wx-root .wx-bubble-video {
+  display: block; width: 100%; max-width: 420px; max-height: 480px;
+  border-radius: 6px; background: #000; margin-top: 6px;
+}
+#xhs-wx-root .wx-msg.me .wx-bubble-video { background: #000; }
+
 /* 楼中楼：在父气泡内缩进展示 */
 #xhs-wx-root .wx-subcomments { margin-top: 8px; border-left: 2px solid var(--border-1); padding-left: 10px; display: flex; flex-direction: column; gap: 8px; }
 #xhs-wx-root .wx-subcomment { font-size: 13px; }
