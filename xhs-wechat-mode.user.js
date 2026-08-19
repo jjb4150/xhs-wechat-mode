@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.2.3
+// @version      0.3.0
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -440,6 +440,50 @@
   animation: wx-toast-in .18s ease-out;
 }
 @keyframes wx-toast-in { from { opacity: 0; transform: translate(-50%, -8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* ---- 丝滑：过渡与动画 ---- */
+#xhs-wx-root .wx-item { transition: background-color .15s ease; }
+#xhs-wx-root .wx-link-btn { transition: background-color .15s ease, color .15s ease; }
+#xhs-wx-root .wx-nav-btn { transition: background-color .15s ease, color .15s ease; }
+
+/* 详情正文到达：轻淡入上移（按需挂 .wx-anim，避免全量重渲时重复播放） */
+#xhs-wx-root .wx-msg.wx-anim { animation: wx-msg-in .22s ease-out; }
+@keyframes wx-msg-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+/* 评论区整体到达：容器淡入 */
+#xhs-wx-root #wx-comments.wx-comments-in { animation: wx-comments-in .25s ease-out; }
+@keyframes wx-comments-in { from { opacity: 0; } to { opacity: 1; } }
+/* 分批加载追加的评论：滑入 */
+#xhs-wx-root .wx-msg.wx-msg-new { animation: wx-msg-slide .3s cubic-bezier(.2,.7,.3,1); }
+@keyframes wx-msg-slide { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: translateY(0); } }
+/* 尊重系统减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  #xhs-wx-root .wx-msg, #xhs-wx-root .wx-msg.wx-msg-new { animation: none; }
+}
+
+/* 图片入场淡显（默认可见，仅加动画；未监听到 load 也不影响显示） */
+#xhs-wx-root img.wx-img-in { animation: wx-img-in .28s ease-out; }
+@keyframes wx-img-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* 长评论列表：视口外跳过渲染，滚动更顺 */
+#xhs-wx-root .wx-detail-body .wx-msg { content-visibility: auto; contain-intrinsic-size: auto 96px; }
+
+/* ---- 骨架屏 ---- */
+#xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }
+#xhs-wx-root .wx-sk-avatar {
+  width: 38px; height: 38px; border-radius: 6px; flex: none; background: var(--sk, #e6e6e6);
+  animation: wx-shimmer 1.3s ease-in-out infinite;
+}
+#xhs-wx-root .wx-sk-body { display: flex; flex-direction: column; gap: 10px; flex: 1; max-width: 62%; }
+#xhs-wx-root .wx-sk-line {
+  height: 14px; border-radius: 4px; background: var(--sk, #e6e6e6);
+  animation: wx-shimmer 1.3s ease-in-out infinite;
+}
+#xhs-wx-root .wx-sk-block {
+  border-radius: 8px; background: var(--sk, #e6e6e6);
+  animation: wx-shimmer 1.3s ease-in-out infinite;
+}
+#xhs-wx-root.dark { --sk: #2f2f2f; }
+@keyframes wx-shimmer { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 `;
 
   function injectCss() {
@@ -741,6 +785,16 @@
     rootEl.querySelector("#wx-like-toggle").addEventListener("click", () => actInteract("like"));
     rootEl.querySelector("#wx-collect-toggle").addEventListener("click", () => actInteract("collect"));
 
+    // 图片入场淡显：load 事件不冒泡，用捕获阶段委托（rootEl 绑定一次）
+    rootEl.addEventListener(
+      "load",
+      (e) => {
+        const t = e.target;
+        if (t && t.tagName === "IMG") t.classList.add("wx-img-in");
+      },
+      true
+    );
+
     // 详情区事件委托（一次性）
     bindDetailEventsOnce(rootEl);
   }
@@ -933,7 +987,31 @@
       ${isUnread ? '<span class="wx-item-unread"></span>' : ""}
     `;
     div.addEventListener("click", () => openNote(note));
+    // 悬停预取：停留 400ms 即提前拉取正文数据，点击时直接命中缓存秒开
+    let hoverTimer = null;
+    div.addEventListener("mouseenter", () => {
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(() => prefetchNoteDetail(note), 400);
+    });
+    div.addEventListener("mouseleave", () => clearTimeout(hoverTimer));
     return div;
+  }
+
+  // 预取正文（单并发，避免悬停扫过一排时并发拉一堆）
+  let prefetchInFlight = false;
+  const prefetchDone = new Set();
+  function prefetchNoteDetail(note) {
+    if (prefetchDone.has(note.noteId) || detailCache.get(note.noteId)) return;
+    if (prefetchInFlight) return;
+    prefetchInFlight = true;
+    fetchNoteDetail(note)
+      .then((detail) => {
+        prefetchDone.add(note.noteId);
+        if (detail) cachePutDetail(note.noteId, { ...detail, comments: [] });
+        log("预取完成：", note.noteId);
+      })
+      .catch(() => { /* 静默，点击时会正常重试 */ })
+      .finally(() => { prefetchInFlight = false; });
   }
 
   // 全量渲染（初始 / 搜索词变化时使用；点击路径走增量更新避免图片重新加载闪动）
@@ -1276,19 +1354,41 @@
     openBtn.href = note.url;
     composer.hidden = false;
 
-    // 缓存命中：直接渲染正文+评论，秒开（iframe 仍后台预热以便互动操作）
+    // 缓存命中：直接渲染，秒开。预取缓存（无评论）需继续走 iframe 评论加载
     const cached = cacheGetDetail(note.noteId);
     if (cached) {
       state.activeDetail = cached;
       renderDetailShell();
       renderCommentsInto();
       updateInteractButtons();
-      loadNoteInFrame(note, { waitComments: false }).catch(() => {}); // 后台预热，不阻塞
+      if (!cached.comments) {
+        try {
+          const { doc } = await loadNoteInFrame(note, { waitComments: true });
+          if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
+          const frameState = extractFrameState(doc);
+          const parsed = parseComments(doc);
+          state.activeDetail.comments = parsed.comments;
+          state.activeDetail.totalText = parsed.totalText;
+          if (frameState.interact) {
+            state.activeDetail.interact = { ...state.activeDetail.interact, ...frameState.interact };
+          }
+          renderCommentsInto(true);
+          updateInteractButtons();
+          cachePutDetail(note.noteId, state.activeDetail);
+        } catch (e) {
+          if (state.activeNote && state.activeNote.noteId === note.noteId) {
+            state.activeDetail.commentError = e.message;
+            renderCommentsInto();
+          }
+        }
+      } else {
+        loadNoteInFrame(note, { waitComments: false }).catch(() => {}); // 后台预热，不阻塞
+      }
       return;
     }
 
     const body = rootEl.querySelector("#wx-detail-body");
-    body.innerHTML = `<div class="wx-loading-detail">正在加载笔记与评论…</div>`;
+    body.innerHTML = renderSkeleton();
     rootEl.querySelector("#wx-like-toggle").hidden = true;
     rootEl.querySelector("#wx-collect-toggle").hidden = true;
 
@@ -1302,7 +1402,7 @@
 
     // 若已切换笔记则放弃渲染
     if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
-    state.activeDetail = { ...(detail || {}), comments: [], commentError: detail ? "" : "正文加载失败，正在从页面重试…" };
+    state.activeDetail = { ...(detail || {}), comments: undefined, commentError: detail ? "" : "正文加载失败，正在从页面重试…" };
     renderDetailShell();
 
     // iframe：评论 + 互动操作载体 + 正文兜底
@@ -1326,7 +1426,7 @@
       if (frameState.interact) {
         state.activeDetail.interact = { ...state.activeDetail.interact, ...frameState.interact };
       }
-      renderCommentsInto(); // 只更新评论区，正文图片不重载
+      renderCommentsInto(true); // 只更新评论区，正文图片不重载
       updateInteractButtons();
       cachePutDetail(note.noteId, state.activeDetail);
       log("评论加载完成：", parsed.comments.length, "条一级评论");
@@ -1433,6 +1533,14 @@
         detail.comments = parsed.comments;
         detail.totalText = parsed.totalText;
         renderCommentsInto();
+        // 新增评论滑入动画（只给最后 added 条）
+        const box = ensureRoot().querySelector("#wx-comments");
+        if (box) {
+          const msgs = box.querySelectorAll(".wx-msg");
+          for (let i = Math.max(0, msgs.length - added); i < msgs.length; i++) {
+            msgs[i].classList.add("wx-msg-new");
+          }
+        }
         cachePutDetail(note.noteId, detail);
         setMoreCommentsStatus("");
         log("评论分批：新增", added, "条，累计", detail.comments.length);
@@ -1509,7 +1617,7 @@
       : "";
 
     return `
-      <div class="wx-msg" data-role="note">
+      <div class="wx-msg wx-anim" data-role="note">
         ${author.avatar ? `<img class="wx-avatar" src="${escapeHtml(author.avatar)}" alt=""/>` : `<div class="wx-avatar"></div>`}
         <div class="wx-msg-body">
           <div class="wx-msg-name">${escapeHtml(author.nickname || "")}</div>
@@ -1569,6 +1677,28 @@
     `;
   }
 
+  // 加载骨架屏（比转圈文字感知更快，形状即最终布局）
+  function renderSkeleton() {
+    return `
+      <div class="wx-skeleton-msg">
+        <div class="wx-sk-avatar"></div>
+        <div class="wx-sk-body">
+          <div class="wx-sk-line" style="width:36%"></div>
+          <div class="wx-sk-block" style="height:180px"></div>
+          <div class="wx-sk-line" style="width:80%"></div>
+          <div class="wx-sk-line" style="width:55%"></div>
+        </div>
+      </div>
+      <div class="wx-skeleton-msg">
+        <div class="wx-sk-avatar"></div>
+        <div class="wx-sk-body">
+          <div class="wx-sk-line" style="width:30%"></div>
+          <div class="wx-sk-line" style="width:72%"></div>
+        </div>
+      </div>
+    `;
+  }
+
   // 渲染详情骨架（正文气泡 + 评论占位容器）。评论到位后只更新评论区，避免正文图片重载
   function renderDetailShell() {
     const rootEl = ensureRoot();
@@ -1579,12 +1709,13 @@
     body.scrollTop = 0;
   }
 
-  // 只更新评论区（正文不动，滚动位置不动）
-  function renderCommentsInto() {
+  // 只更新评论区（正文不动，滚动位置不动）。animate：评论数据首次到达时容器淡入
+  function renderCommentsInto(animate) {
     const rootEl = ensureRoot();
     const box = rootEl.querySelector("#wx-comments");
     const detail = state.activeDetail;
     if (!box || !detail) return;
+    box.classList.toggle("wx-comments-in", !!animate);
 
     const parts = [];
     if (detail.commentError) {
@@ -1623,17 +1754,19 @@
       const more = e.target.closest("[data-more]");
       if (more) expandReplies(more);
     });
-    // 滚动接近底部 -> 分批加载下一页评论
+    // 滚动接近底部 -> 分批加载下一页评论（提前 300px 触发，滚到时已就绪）
     body.addEventListener(
       "scroll",
       () => {
-        if (body.scrollTop + body.clientHeight >= body.scrollHeight - 140) {
+        if (body.scrollTop + body.clientHeight >= body.scrollHeight - 300) {
           maybeLoadMoreComments();
         }
       },
       { passive: true }
     );
   }
+
+  // 图片入场淡显：load 事件不冒泡，用捕获阶段委托（rootEl 绑定一次）
 
   function updateInteractButtons() {
     const rootEl = ensureRoot();
@@ -1707,24 +1840,33 @@
       toast("未定位到" + (kind === "like" ? "点赞" : "收藏") + "按钮，可点右上「原页」操作", "error");
       return;
     }
+
+    // 乐观更新：先立即生效，失败再回滚（感知零延迟）
+    const flagKey = kind === "like" ? "liked" : "collected";
+    const countKey = kind === "like" ? "likedCount" : "collectedCount";
+    const prevOn = !!(detail.interact && detail.interact[flagKey]);
+    const prevCount = detail.interact ? detail.interact[countKey] : "";
+    detail.interact = detail.interact || {};
+    detail.interact[flagKey] = !prevOn;
+    const prevNum = Number(prevCount);
+    if (isFinite(prevNum)) detail.interact[countKey] = String(prevOn ? prevNum - 1 : prevNum + 1);
+    updateInteractButtons();
+
     try {
       target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await sleep(900);
-      // 从 iframe 同步最新状态
+      // 以 iframe 实时数字为准（点赞状态 class 匹配不可靠，保留本地推断）
       const frameState = extractFrameState(doc);
       if (frameState.interact) {
-        state.activeDetail.interact = {
-          ...state.activeDetail.interact,
-          ...frameState.interact,
-          collected: kind === "collect" ? !detail.interact.collected : detail.interact.collected,
-        };
+        const liveCount = kind === "like" ? frameState.interact.likedCount : frameState.interact.collectedCount;
+        if (liveCount) detail.interact[countKey] = liveCount;
         updateInteractButtons();
-        toast(kind === "like" ? "已执行点赞/取消" : "已执行收藏/取消", "success");
-      } else {
-        toast("已点击，请稍后刷新确认", "info");
       }
     } catch (e) {
-      warn("互动失败", e);
+      warn("互动失败，回滚", e);
+      detail.interact[flagKey] = prevOn;
+      detail.interact[countKey] = prevCount;
+      updateInteractButtons();
       toast("操作失败：" + e.message, "error");
     }
   }
@@ -1787,7 +1929,25 @@
     }
 
     sendBtn.disabled = true;
-    tip.textContent = "发送中…";
+    tip.textContent = "";
+    // 乐观上屏：立即渲染自己的绿色气泡（发送中状态），失败再移除
+    const optimistic = {
+      author: state.myNickname || "我",
+      userId: state.myUserId || "__me__",
+      avatar: state.myAvatar || "",
+      content: text,
+      date: "发送中…",
+      likeText: "",
+      isAuthor: false,
+    };
+    const detail = state.activeDetail;
+    const commentsArr = (detail.comments = detail.comments || []);
+    commentsArr.push(optimistic);
+    renderCommentsInto();
+    const optimisticIdx = commentsArr.length - 1;
+    const body = ensureRoot().querySelector("#wx-detail-body");
+    body.scrollTop = body.scrollHeight; // 滚到底部看到自己的气泡
+
     try {
       box.focus();
       // React 受控 contenteditable：优先在 iframe 文档上下文用 execCommand 触发 input 事件
@@ -1812,7 +1972,7 @@
       await sleep(300);
       submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await sleep(1500);
-      // 刷新评论
+      // 刷新为真实评论（成功：乐观气泡被真实数据覆盖；失败：下方回滚）
       const parsed = parseComments(doc);
       if (state.activeDetail) {
         state.activeDetail.comments = parsed.comments;
@@ -1821,11 +1981,16 @@
       }
       input.textContent = "";
       input.dispatchEvent(new Event("input", { bubbles: true }));
-      tip.textContent = "";
       toast("评论已发送", "success");
     } catch (e) {
       warn("评论发送失败", e);
-      tip.textContent = "";
+      // 回滚：移除乐观气泡，恢复输入内容
+      if (detail.comments && detail.comments[optimisticIdx] === optimistic) {
+        detail.comments.splice(optimisticIdx, 1);
+        renderCommentsInto();
+      }
+      input.textContent = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
       toast("评论发送失败：" + e.message, "error");
     } finally {
       sendBtn.disabled = !(input.textContent || "").trim();

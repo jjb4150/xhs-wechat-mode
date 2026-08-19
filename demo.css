@@ -326,3 +326,47 @@
   animation: wx-toast-in .18s ease-out;
 }
 @keyframes wx-toast-in { from { opacity: 0; transform: translate(-50%, -8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* ---- 丝滑：过渡与动画 ---- */
+#xhs-wx-root .wx-item { transition: background-color .15s ease; }
+#xhs-wx-root .wx-link-btn { transition: background-color .15s ease, color .15s ease; }
+#xhs-wx-root .wx-nav-btn { transition: background-color .15s ease, color .15s ease; }
+
+/* 详情正文到达：轻淡入上移（按需挂 .wx-anim，避免全量重渲时重复播放） */
+#xhs-wx-root .wx-msg.wx-anim { animation: wx-msg-in .22s ease-out; }
+@keyframes wx-msg-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+/* 评论区整体到达：容器淡入 */
+#xhs-wx-root #wx-comments.wx-comments-in { animation: wx-comments-in .25s ease-out; }
+@keyframes wx-comments-in { from { opacity: 0; } to { opacity: 1; } }
+/* 分批加载追加的评论：滑入 */
+#xhs-wx-root .wx-msg.wx-msg-new { animation: wx-msg-slide .3s cubic-bezier(.2,.7,.3,1); }
+@keyframes wx-msg-slide { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: translateY(0); } }
+/* 尊重系统减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  #xhs-wx-root .wx-msg, #xhs-wx-root .wx-msg.wx-msg-new { animation: none; }
+}
+
+/* 图片入场淡显（默认可见，仅加动画；未监听到 load 也不影响显示） */
+#xhs-wx-root img.wx-img-in { animation: wx-img-in .28s ease-out; }
+@keyframes wx-img-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* 长评论列表：视口外跳过渲染，滚动更顺 */
+#xhs-wx-root .wx-detail-body .wx-msg { content-visibility: auto; contain-intrinsic-size: auto 96px; }
+
+/* ---- 骨架屏 ---- */
+#xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }
+#xhs-wx-root .wx-sk-avatar {
+  width: 38px; height: 38px; border-radius: 6px; flex: none; background: var(--sk, #e6e6e6);
+  animation: wx-shimmer 1.3s ease-in-out infinite;
+}
+#xhs-wx-root .wx-sk-body { display: flex; flex-direction: column; gap: 10px; flex: 1; max-width: 62%; }
+#xhs-wx-root .wx-sk-line {
+  height: 14px; border-radius: 4px; background: var(--sk, #e6e6e6);
+  animation: wx-shimmer 1.3s ease-in-out infinite;
+}
+#xhs-wx-root .wx-sk-block {
+  border-radius: 8px; background: var(--sk, #e6e6e6);
+  animation: wx-shimmer 1.3s ease-in-out infinite;
+}
+#xhs-wx-root.dark { --sk: #2f2f2f; }
+@keyframes wx-shimmer { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
