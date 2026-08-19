@@ -208,7 +208,8 @@
   min-height: 44px; max-height: 140px; overflow-y: auto; outline: none;
   font-size: 14px; color: #1a1a1a; word-break: break-word;
 }
-#xhs-wx-root .wx-input:empty::before {
+/* placeholder 由 JS 维护 .empty 类控制，避免 contenteditable 中 :empty 被 <br> 破坏 */
+#xhs-wx-root .wx-input.empty::before {
   content: attr(data-placeholder); color: #bbb;
 }
 #xhs-wx-root .wx-composer-bar { display: flex; align-items: center; margin-top: 8px; }

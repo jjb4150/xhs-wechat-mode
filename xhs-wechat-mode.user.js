@@ -314,7 +314,8 @@
   min-height: 44px; max-height: 140px; overflow-y: auto; outline: none;
   font-size: 14px; color: #1a1a1a; word-break: break-word;
 }
-#xhs-wx-root .wx-input:empty::before {
+/* placeholder 由 JS 维护 .empty 类控制，避免 contenteditable 中 :empty 被 <br> 破坏 */
+#xhs-wx-root .wx-input.empty::before {
   content: attr(data-placeholder); color: #bbb;
 }
 #xhs-wx-root .wx-composer-bar { display: flex; align-items: center; margin-top: 8px; }
@@ -555,13 +556,16 @@
     // 拖拽调宽
     bindResize(rootEl);
 
-    // 输入框
+    // 输入框（placeholder 用 .empty 类维护，规避 contenteditable 的 :empty 失效问题）
     const input = rootEl.querySelector("#wx-input");
     const sendBtn = rootEl.querySelector("#wx-send");
-    const syncSend = () => {
-      sendBtn.disabled = !(input.textContent || "").trim();
+    input.classList.add("empty");
+    const syncComposerState = () => {
+      const hasContent = !!(input.textContent || "").trim();
+      sendBtn.disabled = !hasContent;
+      input.classList.toggle("empty", !hasContent);
     };
-    input.addEventListener("input", syncSend);
+    input.addEventListener("input", syncComposerState);
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
@@ -620,27 +624,33 @@
 
   function scanFeed(force) {
     const items = document.querySelectorAll(".note-item");
-    let added = 0;
+    const added = [];
     for (const item of items) {
       const note = parseNoteItem(item);
       if (!note || !note.noteId) continue;
       if (!state.notesIndex.has(note.noteId)) {
         state.notesIndex.set(note.noteId, note);
         state.notes.push(note);
-        added++;
+        added.push(note);
       } else if (force) {
         // 刷新时更新已有条目的最新数据
         const old = state.notesIndex.get(note.noteId);
         Object.assign(old, note);
       }
     }
-    if (added > 0) {
-      log("feed 扫描：新增", added, "条，总计", state.notes.length);
-      if (state.navTab === "chat") renderList();
+    if (added.length > 0) {
+      log("feed 扫描：新增", added.length, "条，总计", state.notes.length);
+      if (state.navTab === "chat") {
+        if (state.keyword) {
+          renderList(); // 搜索态下全量重建
+        } else {
+          appendListItems(added); // 常规增量追加，避免闪烁
+        }
+      }
     } else if (force) {
       if (state.navTab === "chat") renderList();
     }
-    return added;
+    return added.length;
   }
 
   function parseNoteItem(item) {
@@ -713,6 +723,29 @@
 
   /* ============================== 会话列表渲染 ============================== */
 
+  // 构建单个列表项节点（renderList 与增量追加共用）
+  function buildListItem(note, seen) {
+    const isUnread = !seen[note.noteId];
+    const isActive = state.activeNote && state.activeNote.noteId === note.noteId;
+    const div = document.createElement("div");
+    div.className = "wx-item" + (isActive ? " active" : "");
+    div.dataset.noteId = note.noteId;
+    div.innerHTML = `
+      ${note.cover ? `<img class="wx-item-cover" loading="lazy" src="${escapeHtml(note.cover)}" alt=""/>` : ""}
+      <div class="wx-item-main">
+        <div class="wx-item-title">${escapeHtml(note.title)}</div>
+        <div class="wx-item-meta">
+          <span class="author">${escapeHtml(note.author || "未知作者")}</span>
+          <span class="likes">♥ ${escapeHtml(note.likeCount || "0")}</span>
+        </div>
+      </div>
+      ${isUnread ? '<span class="wx-item-unread"></span>' : ""}
+    `;
+    div.addEventListener("click", () => openNote(note));
+    return div;
+  }
+
+  // 全量渲染（初始 / 搜索词变化时使用；点击路径走增量更新避免图片重新加载闪动）
   function renderList() {
     const rootEl = ensureRoot();
     const list = rootEl.querySelector("#wx-list");
@@ -732,28 +765,35 @@
     }
 
     const frag = document.createDocumentFragment();
-    items.forEach((note) => {
-      const isUnread = !seen[note.noteId];
-      const isActive = state.activeNote && state.activeNote.noteId === note.noteId;
-      const div = document.createElement("div");
-      div.className = "wx-item" + (isActive ? " active" : "");
-      div.dataset.noteId = note.noteId;
-      div.innerHTML = `
-        ${note.cover ? `<img class="wx-item-cover" loading="lazy" src="${escapeHtml(note.cover)}" alt=""/>` : ""}
-        <div class="wx-item-main">
-          <div class="wx-item-title">${escapeHtml(note.title)}</div>
-          <div class="wx-item-meta">
-            <span class="author">${escapeHtml(note.author || "未知作者")}</span>
-            <span class="likes">♥ ${escapeHtml(note.likeCount || "0")}</span>
-          </div>
-        </div>
-        ${isUnread ? '<span class="wx-item-unread"></span>' : ""}
-      `;
-      div.addEventListener("click", () => openNote(note));
-      frag.appendChild(div);
-    });
+    items.forEach((note) => frag.appendChild(buildListItem(note, seen)));
     list.innerHTML = "";
     list.appendChild(frag);
+  }
+
+  // 增量追加新笔记（不重建已有节点，避免封面图闪烁）
+  function appendListItems(newNotes) {
+    const rootEl = ensureRoot();
+    const list = rootEl.querySelector("#wx-list");
+    const emptyTip = list.querySelector(".wx-empty-list");
+    if (emptyTip) emptyTip.remove();
+    const seen = getSeenMap();
+    const frag = document.createDocumentFragment();
+    for (const note of newNotes) frag.appendChild(buildListItem(note, seen));
+    list.appendChild(frag);
+  }
+
+  // 点击路径：只更新高亮与未读标记，不重建列表
+  function updateListItemState(note) {
+    const rootEl = ensureRoot();
+    const list = rootEl.querySelector("#wx-list");
+    list.querySelectorAll(".wx-item").forEach((el) => {
+      const isActive = el.dataset.noteId === note.noteId;
+      el.classList.toggle("active", isActive);
+      if (isActive) {
+        const dot = el.querySelector(".wx-item-unread");
+        if (dot) dot.remove();
+      }
+    });
   }
 
   function markNoteSeen(note) {
@@ -990,7 +1030,7 @@
   async function openNote(note) {
     state.activeNote = note;
     markNoteSeen(note);
-    renderList(); // 高亮 + 消除未读点
+    updateListItemState(note); // 增量更新高亮与未读点，不重建列表
     const rootEl = ensureRoot();
     const body = rootEl.querySelector("#wx-detail-body");
     const composer = rootEl.querySelector("#wx-composer");
@@ -1375,6 +1415,7 @@
         renderDetailBody(false);
       }
       input.textContent = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
       tip.textContent = "";
       toast("评论已发送", "success");
     } catch (e) {
@@ -1383,6 +1424,7 @@
       toast("评论发送失败：" + e.message, "error");
     } finally {
       sendBtn.disabled = !(input.textContent || "").trim();
+      input.classList.toggle("empty", !(input.textContent || "").trim());
     }
   }
 
