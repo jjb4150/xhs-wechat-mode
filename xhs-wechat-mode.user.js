@@ -16,10 +16,12 @@
 // ==/UserScript==
 
 /*
- * 架构（改造自 Chiphell 微信模式脚本的 UI 思路，数据层针对小红书重写）：
+ * UI 架构改造自《Chiphell 微信模式》（https://greasyfork.org/zh-CN/scripts/590132，作者 Codex，MIT License）
+ * 数据层针对小红书完全重写：
  * - 左栏会话列表 = 首页 feed 笔记流（扫描页面 .note-item DOM + MutationObserver）
  * - 右栏气泡 = 笔记正文（fetch 笔记 URL 解析 __INITIAL_STATE__）+ 评论（隐藏 iframe 加载后读 DOM）
  * - 点赞/收藏/发评论/展开楼中楼 = 驱动隐藏 iframe 里的真实页面控件（零签名、零风控）
+ * 本脚本同样以 MIT License 发布。
  */
 
 (() => {
