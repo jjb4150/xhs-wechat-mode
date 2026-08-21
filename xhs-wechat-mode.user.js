@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.3.1
+// @version      0.3.2
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -1290,39 +1290,40 @@
   }
 
   // 从 iframe doc 解析评论（含已展开的楼中楼）
+  // 实测结构：.list-container > .parent-comment > [.comment-item(一级), .reply-container(楼中楼)]
+  // 即 reply-container 与一级评论是兄弟节点（同在 .parent-comment 内），文档序上一级在前，
+  // 解析时按文档序把每个 reply-container 归给最近的一级评论
   function parseComments(doc) {
     const container = doc.querySelector(".comments-container");
     if (!container) return { comments: [], totalText: "" };
     const totalEl = container.querySelector(".total, .comments-number, .comment-title");
     const totalText = totalEl ? totalEl.textContent.trim() : "";
 
-    // 一级评论 = 不在 .reply-container 内、父链上没有其他 .comment-item 的项
-    const all = [...container.querySelectorAll(".comment-item")];
-    const topItems = all.filter(
-      (el) => !el.parentElement.closest(".comment-item") && !el.closest(".reply-container")
-    );
-
-    const out = [];
-    for (const item of topItems) {
-      const c = parseOneComment(item);
-      if (!c) continue;
-      // 楼中楼：该评论自己的 reply-container 里的直接子评论
-      const replyBox = item.querySelector(".reply-container");
-      if (replyBox) {
-        const subs = [];
-        for (const sub of replyBox.querySelectorAll(".comment-item")) {
-          // 归属判断：closest 的 reply-container 必须是 item 的这个
-          if (sub.closest(".reply-container") !== replyBox) continue;
+    const flat = [...container.querySelectorAll(".comment-item, .reply-container")];
+    const comments = [];
+    for (const node of flat) {
+      if (node.classList.contains("reply-container")) {
+        // 楼中楼容器：归给最近的一级评论
+        if (!comments.length) continue;
+        const parent = comments[comments.length - 1];
+        for (const sub of node.querySelectorAll(".comment-item")) {
+          if (sub.closest(".reply-container") !== node) continue; // 跳过更深嵌套
           const sc = parseOneComment(sub);
-          if (sc) subs.push(sc);
+          if (sc) parent.subComments.push(sc);
         }
-        c.subComments = subs;
-        const more = replyBox.querySelector(".show-more, .reply-more");
-        if (more) c.moreText = more.textContent.trim();
+        const more = node.querySelector(".show-more, .reply-more");
+        if (more) parent.moreText = more.textContent.trim();
+        continue;
       }
-      out.push(c);
+      // 一级评论 = 不处于任何 reply-container 内
+      if (node.closest(".reply-container")) continue;
+      const c = parseOneComment(node);
+      if (c) {
+        c.subComments = [];
+        comments.push(c);
+      }
     }
-    return { comments: out, totalText };
+    return { comments, totalText };
   }
 
   function parseOneComment(item) {
