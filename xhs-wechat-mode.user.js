@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.3.2
+// @version      0.3.3
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -458,6 +458,7 @@
 @keyframes wx-comments-in { from { opacity: 0; } to { opacity: 1; } }
 /* 分批加载追加的评论：滑入 */
 #xhs-wx-root .wx-msg.wx-msg-new { animation: wx-msg-slide .3s cubic-bezier(.2,.7,.3,1); }
+#xhs-wx-root .wx-subcomments.wx-msg-new { animation: wx-msg-slide .3s cubic-bezier(.2,.7,.3,1); }
 @keyframes wx-msg-slide { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: translateY(0); } }
 /* 尊重系统减少动效偏好 */
 @media (prefers-reduced-motion: reduce) {
@@ -1664,11 +1665,11 @@
     `;
   }
 
-  function commentHtml(c) {
+  function commentHtml(c, idx) {
     const mine = state.myUserId && c.userId === state.myUserId;
     const name = escapeHtml(c.author || "网友");
     return `
-      <div class="wx-msg ${mine ? "me" : ""}" data-cid="${escapeHtml(c.userId || "")}">
+      <div class="wx-msg ${mine ? "me" : ""}" data-idx="${Number.isFinite(idx) ? idx : ""}" data-cid="${escapeHtml(c.userId || "")}">
         ${c.avatar ? `<img class="wx-avatar" src="${escapeHtml(c.avatar)}" alt=""/>` : `<div class="wx-avatar"></div>`}
         <div class="wx-msg-body">
           <div class="wx-msg-name">${c.isAuthor ? '<span class="wx-badge">作者</span>' : ""}${name}</div>
@@ -1750,7 +1751,7 @@
     } else {
       const total = detail.totalText || `共 ${detail.comments.length} 条评论`;
       parts.push(`<div class="wx-divider">${escapeHtml(total)}${detail.totalText ? ` · 已加载 ${detail.comments.length} 条` : ""}</div>`);
-      for (const c of detail.comments) parts.push(commentHtml(c));
+      for (let i = 0; i < detail.comments.length; i++) parts.push(commentHtml(detail.comments[i], i));
       if (!detail.comments.length) {
         parts.push(`<div class="wx-divider">还没有评论，抢首评</div>`);
       } else if (!commentsNoMore) {
@@ -1899,32 +1900,46 @@
   async function expandReplies(el) {
     const note = state.activeNote;
     if (!note) return;
-    el.textContent = "展开全部回复中…（会展开所有楼中楼）";
+    // 精准展开：只展开被点击的这条评论的楼中楼（每次展开是一次真实网络请求，避免批量浪费）
+    const msgEl = el.closest(".wx-msg");
+    const idx = msgEl ? Number(msgEl.dataset.idx) : -1;
+    el.textContent = "展开中…";
     const frame = document.getElementById("xhs-wx-engine");
     const doc = frame && frame.contentDocument;
     if (!doc) {
       el.textContent = "引擎不可用";
       return;
     }
-    // 在 iframe 里点击所有“展开回复”
-    let clicked = 0;
-    for (const more of doc.querySelectorAll(".comments-container .show-more, .comments-container .reply-more")) {
-      try {
-        more.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-        clicked++;
-      } catch (e) { /* 忽略 */ }
+    let target = null;
+    if (idx >= 0) {
+      // 外层一级评论组：.comments-container > .list-container > .parent-comment（内层同名容器不会被匹配）
+      const parents = doc.querySelectorAll(".comments-container > .list-container > .parent-comment");
+      const parent = parents[idx];
+      if (parent) {
+        target = parent.querySelector(".reply-container .show-more, .reply-container .reply-more");
+      }
     }
-    if (!clicked) {
+    if (!target) {
       toast("没有可展开的回复", "info");
+      renderCommentsInto();
       return;
     }
-    await sleep(1200);
+    try {
+      target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    } catch (e) { /* 忽略 */ }
+    await sleep(900);
     const parsed = parseComments(doc);
     if (state.activeDetail) {
       state.activeDetail.comments = parsed.comments;
       renderCommentsInto();
       cachePutDetail(note.noteId, state.activeDetail);
-      toast("已展开全部回复", "success");
+      // 该条评论的子区域滑入提示
+      const box = ensureRoot().querySelector("#wx-comments");
+      const refreshed = box && box.querySelector(`.wx-msg[data-idx="${idx}"]`);
+      if (refreshed) {
+        const subs = refreshed.querySelector(".wx-subcomments");
+        if (subs) subs.classList.add("wx-msg-new");
+      }
     }
   }
 
