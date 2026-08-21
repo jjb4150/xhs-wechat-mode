@@ -151,6 +151,7 @@
 #xhs-wx-root .wx-detail {
   flex: 1; min-width: 0; display: flex; flex-direction: column;
   background: var(--bg-detail); min-height: 0;
+  zoom: var(--wx-detail-zoom, 1); /* 详情页整体字号缩放（含气泡与输入框） */
 }
 #xhs-wx-root .wx-detail-head {
   height: 48px; flex: none; display: flex; align-items: center; gap: 10px;
@@ -349,9 +350,6 @@
 /* 图片入场淡显（默认可见，仅加动画；未监听到 load 也不影响显示） */
 #xhs-wx-root img.wx-img-in { animation: wx-img-in .28s ease-out; }
 @keyframes wx-img-in { from { opacity: 0; } to { opacity: 1; } }
-
-/* 长评论列表：视口外跳过渲染，滚动更顺 */
-#xhs-wx-root .wx-detail-body .wx-msg { content-visibility: auto; contain-intrinsic-size: auto 96px; }
 
 /* ---- 骨架屏 ---- */
 #xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }

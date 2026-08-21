@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.3.0
+// @version      0.3.1
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -36,6 +36,7 @@
     likedMap: "xhsWxLikedMap",
     collectedMap: "xhsWxCollectedMap",
     dark: "xhsWxDark",
+    fontScale: "xhsWxFontScale",
   };
 
   /* ============================== 工具 ============================== */
@@ -267,6 +268,7 @@
 #xhs-wx-root .wx-detail {
   flex: 1; min-width: 0; display: flex; flex-direction: column;
   background: var(--bg-detail); min-height: 0;
+  zoom: var(--wx-detail-zoom, 1); /* 详情页整体字号缩放（含气泡与输入框） */
 }
 #xhs-wx-root .wx-detail-head {
   height: 48px; flex: none; display: flex; align-items: center; gap: 10px;
@@ -466,9 +468,6 @@
 #xhs-wx-root img.wx-img-in { animation: wx-img-in .28s ease-out; }
 @keyframes wx-img-in { from { opacity: 0; } to { opacity: 1; } }
 
-/* 长评论列表：视口外跳过渲染，滚动更顺 */
-#xhs-wx-root .wx-detail-body .wx-msg { content-visibility: auto; contain-intrinsic-size: auto 96px; }
-
 /* ---- 骨架屏 ---- */
 #xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }
 #xhs-wx-root .wx-sk-avatar {
@@ -543,6 +542,23 @@
     const next = !isDark();
     storeSet(STORE_KEYS.dark, next);
     applyDark(next);
+  }
+
+  /* 详情页字号缩放（仅作用于右栏详情区，持久化） */
+  function getFontScale() {
+    const v = Number(storeGet(STORE_KEYS.fontScale, 1));
+    return isFinite(v) && v >= 0.8 && v <= 1.5 ? v : 1;
+  }
+
+  function applyFontScale() {
+    ensureRoot().style.setProperty("--wx-detail-zoom", String(getFontScale()));
+  }
+
+  function stepFontScale(delta) {
+    const next = Math.min(1.5, Math.max(0.8, Math.round((getFontScale() + delta) * 10) / 10));
+    storeSet(STORE_KEYS.fontScale, next);
+    applyFontScale();
+    toast("详情页字号 " + Math.round(next * 100) + "%", "info");
   }
 
   function getSeenMap() {
@@ -687,6 +703,8 @@
           <div class="wx-detail-head">
             <div class="wx-detail-title" id="wx-detail-title">选择左侧笔记查看</div>
             <div class="wx-detail-actions">
+              <button type="button" class="wx-link-btn" id="wx-font-dec" title="缩小详情页字号">A−</button>
+              <button type="button" class="wx-link-btn" id="wx-font-inc" title="放大详情页字号">A+</button>
               <button type="button" class="wx-link-btn" id="wx-like-toggle" hidden>点赞</button>
               <button type="button" class="wx-link-btn" id="wx-collect-toggle" hidden>收藏</button>
               <a class="wx-link-btn" id="wx-open-origin" href="#" target="_blank" rel="noopener">原页</a>
@@ -732,6 +750,10 @@
 
     // 暗黑模式切换
     rootEl.querySelector("#wx-theme").addEventListener("click", toggleDark);
+
+    // 详情页字号缩放
+    rootEl.querySelector("#wx-font-inc").addEventListener("click", () => stepFontScale(0.1));
+    rootEl.querySelector("#wx-font-dec").addEventListener("click", () => stepFontScale(-0.1));
 
     // 退出微信模式
     rootEl.querySelector("#wx-exit").addEventListener("click", () => {
@@ -2169,6 +2191,7 @@
     ensureRoot();
     applyMyProfileToUi();
     applyDark(isDark());
+    applyFontScale();
     scanFeed(true);
     observeFeed();
     // 首屏 feed / 侧边栏"我"可能渲染较晚，延迟补扫补身份
