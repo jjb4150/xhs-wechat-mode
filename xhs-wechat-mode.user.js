@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.3.3
+// @version      0.3.4
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -1012,13 +1012,24 @@
       ${isUnread ? '<span class="wx-item-unread"></span>' : ""}
     `;
     div.addEventListener("click", () => openNote(note));
-    // 悬停预取：停留 400ms 即提前拉取正文数据，点击时直接命中缓存秒开
+    // 悬停预取：停留 400ms 提前拉正文数据；停留 650ms 预热引擎 iframe（评论请求随页面自动发出）
+    // 点击同一条时 iframe 直接复用（loadNoteInFrame 的 alreadyThere 分支），评论大幅提速
     let hoverTimer = null;
+    let warmTimer = null;
     div.addEventListener("mouseenter", () => {
       clearTimeout(hoverTimer);
+      clearTimeout(warmTimer);
       hoverTimer = setTimeout(() => prefetchNoteDetail(note), 400);
+      warmTimer = setTimeout(() => {
+        if (detailCache.get(note.noteId)) return; // 已有完整缓存则无需预热
+        loadNoteInFrame(note, { waitComments: false }).catch(() => { /* 静默 */ });
+        log("iframe 预热：", note.noteId);
+      }, 650);
     });
-    div.addEventListener("mouseleave", () => clearTimeout(hoverTimer));
+    div.addEventListener("mouseleave", () => {
+      clearTimeout(hoverTimer);
+      clearTimeout(warmTimer);
+    });
     return div;
   }
 
@@ -1276,15 +1287,15 @@
           const commentsListed = !!doc.querySelector(".comments-container .comment-item");
           const waited = Date.now() - started;
           if (hasBody && (!waitComments || commentsListed || waited > 8000)) {
-            // 再等 500ms 让评论尽量渲染完整
+            // 再等 600ms 让首批评论尽量渲染完整
             setTimeout(() => {
               if (seq === state.frameSeq) finish(null, doc);
               else finish(new Error("已切换到其他笔记"));
-            }, 500);
+            }, 600);
             return;
           }
           if (!hasBody && waited > 15000) return finish(null, doc); // 降级返回
-          setTimeout(poll, 350);
+          setTimeout(poll, 220);
         })();
       }
     });
@@ -1546,18 +1557,18 @@
     const detail = state.activeDetail;
     if (!note || !detail || commentsLoadingMore || commentsNoMore) return;
     if (!detail.comments || detail.commentError) return;
-    const frame = document.getElementById("xhs-wx-engine");
-    const doc = frame && frame.contentDocument;
+    const doc = frameDocFor(note);
     if (!doc || !doc.querySelector(".comments-container")) return;
 
     commentsLoadingMore = true;
     setMoreCommentsStatus("正在加载更多评论…");
     try {
       const added = await loadMoreComments(doc);
+      if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
       if (added > 0) {
         const parsed = parseComments(doc);
-        detail.comments = parsed.comments;
-        detail.totalText = parsed.totalText;
+        state.activeDetail.comments = parsed.comments;
+        state.activeDetail.totalText = parsed.totalText;
         renderCommentsInto();
         // 新增评论滑入动画（只给最后 added 条）
         const box = ensureRoot().querySelector("#wx-comments");
@@ -1567,9 +1578,9 @@
             msgs[i].classList.add("wx-msg-new");
           }
         }
-        cachePutDetail(note.noteId, detail);
+        cachePutDetail(note.noteId, state.activeDetail);
         setMoreCommentsStatus("");
-        log("评论分批：新增", added, "条，累计", detail.comments.length);
+        log("评论分批：新增", added, "条，累计", state.activeDetail.comments.length);
       } else {
         commentsNoMore = true;
         setMoreCommentsStatus(detail.comments.length ? "评论已全部加载" : "");
@@ -1823,6 +1834,20 @@
 
   /* ============================== 互动操作（iframe 驱动） ============================== */
 
+  // 笔记一致性守卫：iframe 必须存在、已加载、且正是当前打开的这篇笔记，才返回其 doc。
+  // 防止切换笔记后旧回调把别的笔记数据写进当前界面（评论串台/缓存污染）
+  function frameDocFor(note) {
+    try {
+      const frame = document.getElementById("xhs-wx-engine");
+      if (!frame) return null;
+      const href = frame.contentWindow && frame.contentWindow.location && frame.contentWindow.location.href;
+      if (!href || !note || !href.includes(note.noteId || "\u0000")) return null;
+      return frame.contentDocument || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   // 在引擎 iframe 中定位互动按钮：返回 {like, collect}
   function findInteractButtons(doc) {
     const box = doc.querySelector(".interact-container");
@@ -1854,8 +1879,7 @@
     const note = state.activeNote;
     const detail = state.activeDetail;
     if (!note || !detail) return;
-    const frame = document.getElementById("xhs-wx-engine");
-    const doc = frame && frame.contentDocument;
+    const doc = frameDocFor(note);
     if (!doc) {
       toast("页面引擎未就绪，请重新打开笔记", "error");
       return;
@@ -1881,6 +1905,7 @@
     try {
       target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await sleep(900);
+      if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
       // 以 iframe 实时数字为准（点赞状态 class 匹配不可靠，保留本地推断）
       const frameState = extractFrameState(doc);
       if (frameState.interact) {
@@ -1904,8 +1929,7 @@
     const msgEl = el.closest(".wx-msg");
     const idx = msgEl ? Number(msgEl.dataset.idx) : -1;
     el.textContent = "展开中…";
-    const frame = document.getElementById("xhs-wx-engine");
-    const doc = frame && frame.contentDocument;
+    const doc = frameDocFor(note);
     if (!doc) {
       el.textContent = "引擎不可用";
       return;
@@ -1928,8 +1952,9 @@
       target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     } catch (e) { /* 忽略 */ }
     await sleep(900);
+    if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
     const parsed = parseComments(doc);
-    if (state.activeDetail) {
+    if (state.activeDetail && state.activeNote && state.activeNote.noteId === note.noteId) {
       state.activeDetail.comments = parsed.comments;
       renderCommentsInto();
       cachePutDetail(note.noteId, state.activeDetail);
@@ -1954,8 +1979,7 @@
     const note = state.activeNote;
     if (!text || !note) return;
 
-    const frame = document.getElementById("xhs-wx-engine");
-    const doc = frame && frame.contentDocument;
+    const doc = frameDocFor(note);
     if (!doc) {
       toast("页面引擎未就绪，请重新打开笔记", "error");
       return;
@@ -2012,6 +2036,7 @@
       await sleep(300);
       submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await sleep(1500);
+      if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
       // 刷新为真实评论（成功：乐观气泡被真实数据覆盖；失败：下方回滚）
       const parsed = parseComments(doc);
       if (state.activeDetail) {
