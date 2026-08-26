@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.5.0
+// @version      0.5.1
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -823,10 +823,11 @@
       if (!id) return;
       const note = state.notesIndex.get(id);
       if (!note) return;
-      // 悬停 400ms 预取正文；650ms 用 warm 帧预热页面（不打断正在打开的笔记）
+      // 悬停 400ms 预取正文；650ms 预热页面——门控是「评论未就绪」而非「无缓存」
       hoverFetchTimer = setTimeout(() => prefetchNoteDetail(note), 400);
       hoverWarmTimer = setTimeout(() => {
-        if (!detailCache.get(note.noteId)) warmFrameFor(note);
+        const hit = detailCache.get(note.noteId);
+        if (!hit || !hit.detail || !hit.detail.comments) warmFrameFor(note);
       }, 650);
     });
     listEl.addEventListener("mouseleave", () => {
@@ -1458,21 +1459,48 @@
 
   /* ============================== 打开笔记 & 渲染 ============================== */
 
-  /* 跟读预取（深度 1）：打开第 i 条时自动预取下一条的正文+图片并预热其页面。
-   * feed 顺序浏览的预测式预取——点开下一条时正文/图片/评论大概率已就绪。
-   * 保护：设置可关；页面切后台暂停；预热延迟 1.5s 错峰（不与当前笔记的加载抢带宽） */
+  /* 跟读预取（深度 1）：打开第 i 条时自动预取下一条的正文+图片；页面预热待引擎空闲后执行。
+   * 门控要点：预热条件是「评论未就绪」而非「无缓存」——正文预取成功后缓存必有值，
+   * 若按无缓存判断则预取越成功、预热越不执行（方向相反的坑）。
+   * 预热时机：事件驱动（当前笔记评论渲染完成后释放）+ 8s 兜底，避免与引擎帧抢带宽。
+   * 保护：设置可关；页面切后台暂停 */
+  let pendingWarm = null; // { noteId, note, timer }：待引擎空闲后执行的预热
+
+  function clearPendingWarm() {
+    if (pendingWarm) {
+      clearTimeout(pendingWarm.timer);
+      pendingWarm = null;
+    }
+  }
+
+  function queueWarmAfterEngineIdle(note) {
+    clearPendingWarm();
+    const entry = { noteId: note.noteId, note, timer: 0 };
+    entry.timer = setTimeout(releasePendingWarm, 8000); // 兜底：评论加载迟迟不完成也要预热
+    pendingWarm = entry;
+  }
+
+  // 引擎空闲（当前笔记评论已渲染/加载结束）时调用，真正执行 warm
+  function releasePendingWarm() {
+    const entry = pendingWarm;
+    if (!entry) return;
+    pendingWarm = null;
+    clearTimeout(entry.timer);
+    if (document.hidden) return;
+    if (storeGet(STORE_KEYS.followPrefetch, true) === false) return;
+    const hit = detailCache.get(entry.noteId);
+    // 评论未就绪才需要预热（正文已缓存但 comments 为 undefined 的，正是预热目标）
+    if (!hit || !hit.detail || !hit.detail.comments) warmFrameFor(entry.note);
+  }
+
   function followUpPrefetch(currentNote) {
     if (storeGet(STORE_KEYS.followPrefetch, true) === false) return;
     if (document.hidden) return;
     const idx = state.notes.findIndex((n) => n.noteId === currentNote.noteId);
     if (idx < 0 || idx + 1 >= state.notes.length) return;
     const next = state.notes[idx + 1];
-    prefetchNoteDetail(next); // 正文+图片（轻，立即）
-    setTimeout(() => {
-      if (document.hidden) return;                 // 后台暂停
-      if (storeGet(STORE_KEYS.followPrefetch, true) === false) return;
-      if (!detailCache.get(next.noteId)) warmFrameFor(next); // 页面预热（重，错峰）
-    }, 1500);
+    prefetchNoteDetail(next);       // 正文+图片（轻，立即）
+    queueWarmAfterEngineIdle(next); // 页面预热（重，等引擎空闲，8s 兜底）
   }
 
   async function openNote(note) {
@@ -1512,14 +1540,19 @@
           renderCommentsInto(true);
           updateInteractButtons();
           cachePutDetail(note.noteId, state.activeDetail);
+          releasePendingWarm(); // 引擎空闲，启动下一条的预热
         } catch (e) {
+          releasePendingWarm(); // 加载失败也让出引擎
           if (state.activeNote && state.activeNote.noteId === note.noteId) {
             state.activeDetail.commentError = e.message;
             renderCommentsInto();
           }
         }
       } else {
-        loadNoteInFrame(note, { waitComments: false }).catch(() => {}); // 后台预热，不阻塞
+        // 评论已就绪：引擎加载完（不等待评论）即释放预热
+        loadNoteInFrame(note, { waitComments: false })
+          .then(() => releasePendingWarm())
+          .catch(() => releasePendingWarm());
       }
       return;
     }
@@ -1566,9 +1599,11 @@
       renderCommentsInto(true); // 只更新评论区，正文图片不重载
       updateInteractButtons();
       cachePutDetail(note.noteId, state.activeDetail);
+      releasePendingWarm(); // 引擎空闲，启动下一条的预热
       log("评论加载完成：", parsed.comments.length, "条一级评论");
     } catch (e) {
       warn("评论加载失败", e);
+      releasePendingWarm(); // 失败也让出引擎，别让下一条的预热卡到兜底超时
       if (state.activeNote && state.activeNote.noteId === note.noteId) {
         state.activeDetail.commentError = e.message;
         renderCommentsInto();
