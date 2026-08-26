@@ -341,6 +341,7 @@
 @keyframes wx-comments-in { from { opacity: 0; } to { opacity: 1; } }
 /* 分批加载追加的评论：滑入 */
 #xhs-wx-root .wx-msg.wx-msg-new { animation: wx-msg-slide .3s cubic-bezier(.2,.7,.3,1); }
+#xhs-wx-root .wx-subcomments.wx-msg-new { animation: wx-msg-slide .3s cubic-bezier(.2,.7,.3,1); }
 @keyframes wx-msg-slide { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: translateY(0); } }
 /* 尊重系统减少动效偏好 */
 @media (prefers-reduced-motion: reduce) {
@@ -350,6 +351,17 @@
 /* 图片入场淡显（默认可见，仅加动画；未监听到 load 也不影响显示） */
 #xhs-wx-root img.wx-img-in { animation: wx-img-in .28s ease-out; }
 @keyframes wx-img-in { from { opacity: 0; } to { opacity: 1; } }
+/* 加载失败：隐藏裂图图标，露出底色占位 */
+#xhs-wx-root img.wx-img-broken { opacity: 0; }
+
+/* 主题（明暗）切换平滑过渡：只给关键容器，避免全局 transition 副作用 */
+#xhs-wx-root .wx-top,
+#xhs-wx-root .wx-navrail,
+#xhs-wx-root .wx-aside,
+#xhs-wx-root .wx-detail,
+#xhs-wx-root .wx-bubble,
+#xhs-wx-root .wx-composer-inner,
+#xhs-wx-root .wx-search input { transition: background-color .25s ease, color .25s ease, border-color .25s ease; }
 
 /* ---- 骨架屏 ---- */
 #xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.3.5
+// @version      0.4.0
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -468,6 +468,17 @@
 /* 图片入场淡显（默认可见，仅加动画；未监听到 load 也不影响显示） */
 #xhs-wx-root img.wx-img-in { animation: wx-img-in .28s ease-out; }
 @keyframes wx-img-in { from { opacity: 0; } to { opacity: 1; } }
+/* 加载失败：隐藏裂图图标，露出底色占位 */
+#xhs-wx-root img.wx-img-broken { opacity: 0; }
+
+/* 主题（明暗）切换平滑过渡：只给关键容器，避免全局 transition 副作用 */
+#xhs-wx-root .wx-top,
+#xhs-wx-root .wx-navrail,
+#xhs-wx-root .wx-aside,
+#xhs-wx-root .wx-detail,
+#xhs-wx-root .wx-bubble,
+#xhs-wx-root .wx-composer-inner,
+#xhs-wx-root .wx-search input { transition: background-color .25s ease, color .25s ease, border-color .25s ease; }
 
 /* ---- 骨架屏 ---- */
 #xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }
@@ -788,6 +799,40 @@
       }
     });
 
+    // 列表事件委托（click + 悬停预取/预热）：容器级一次绑定，替代每项三个监听器
+    let hoverNoteId = null;
+    let hoverFetchTimer = null;
+    let hoverWarmTimer = null;
+    const clearHoverTimers = () => {
+      clearTimeout(hoverFetchTimer);
+      clearTimeout(hoverWarmTimer);
+    };
+    listEl.addEventListener("click", (e) => {
+      const item = e.target.closest(".wx-item");
+      if (!item) return;
+      const note = state.notesIndex.get(item.dataset.noteId);
+      if (note) openNote(note);
+    });
+    listEl.addEventListener("mouseover", (e) => {
+      const item = e.target.closest(".wx-item");
+      const id = item ? item.dataset.noteId : null;
+      if (id === hoverNoteId) return;
+      clearHoverTimers();
+      hoverNoteId = id;
+      if (!id) return;
+      const note = state.notesIndex.get(id);
+      if (!note) return;
+      // 悬停 400ms 预取正文；650ms 用 warm 帧预热页面（不打断正在打开的笔记）
+      hoverFetchTimer = setTimeout(() => prefetchNoteDetail(note), 400);
+      hoverWarmTimer = setTimeout(() => {
+        if (!detailCache.get(note.noteId)) warmFrameFor(note);
+      }, 650);
+    });
+    listEl.addEventListener("mouseleave", () => {
+      clearHoverTimers();
+      hoverNoteId = null;
+    });
+
     // 拖拽调宽
     bindResize(rootEl);
 
@@ -819,6 +864,15 @@
       (e) => {
         const t = e.target;
         if (t && t.tagName === "IMG") t.classList.add("wx-img-in");
+      },
+      true
+    );
+    // 图片加载失败兜底：隐藏裂图，露出底色占位（error 同样不冒泡，捕获委托）
+    rootEl.addEventListener(
+      "error",
+      (e) => {
+        const t = e.target;
+        if (t && t.tagName === "IMG") t.classList.add("wx-img-broken");
       },
       true
     );
@@ -1014,24 +1068,7 @@
       </div>
       ${isUnread ? '<span class="wx-item-unread"></span>' : ""}
     `;
-    div.addEventListener("click", () => openNote(note));
-    // 悬停预取：停留 400ms 提前拉正文数据；停留 650ms 用 warm 帧预热笔记页（评论请求随页面自动发出）。
-    // 预热只动 warm 帧，不会打断正在打开的笔记；点击时 promoteWarmFrame 自动复用
-    let hoverTimer = null;
-    let warmTimer = null;
-    div.addEventListener("mouseenter", () => {
-      clearTimeout(hoverTimer);
-      clearTimeout(warmTimer);
-      hoverTimer = setTimeout(() => prefetchNoteDetail(note), 400);
-      warmTimer = setTimeout(() => {
-        if (detailCache.get(note.noteId)) return; // 已有完整缓存则无需预热
-        warmFrameFor(note);
-      }, 650);
-    });
-    div.addEventListener("mouseleave", () => {
-      clearTimeout(hoverTimer);
-      clearTimeout(warmTimer);
-    });
+    // 点击/悬停事件统一在 #wx-list 容器上委托（见 bindRootEvents），避免上千列表项逐条挂监听
     return div;
   }
 
@@ -1605,16 +1642,14 @@
       if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
       if (added > 0) {
         const parsed = parseComments(doc);
+        const prevLen = (state.activeDetail && state.activeDetail.comments) ? state.activeDetail.comments.length : 0;
+        const fresh = parsed.comments.slice(prevLen);
         state.activeDetail.comments = parsed.comments;
         state.activeDetail.totalText = parsed.totalText;
-        renderCommentsInto();
-        // 新增评论滑入动画（只给最后 added 条）
-        const box = ensureRoot().querySelector("#wx-comments");
-        if (box) {
-          const msgs = box.querySelectorAll(".wx-msg");
-          for (let i = Math.max(0, msgs.length - added); i < msgs.length; i++) {
-            msgs[i].classList.add("wx-msg-new");
-          }
+        if (fresh.length && parsed.comments.length === prevLen + fresh.length) {
+          appendCommentNodes(fresh, prevLen); // 增量追加，不重排已有评论
+        } else {
+          renderCommentsInto(); // 结构异常（如头部插入）时全量兜底
         }
         cachePutDetail(note.noteId, state.activeDetail);
         setMoreCommentsStatus("");
@@ -1800,7 +1835,7 @@
       parts.push(`<div class="wx-divider">评论加载中…</div>`);
     } else {
       const total = detail.totalText || `共 ${detail.comments.length} 条评论`;
-      parts.push(`<div class="wx-divider">${escapeHtml(total)}${detail.totalText ? ` · 已加载 ${detail.comments.length} 条` : ""}</div>`);
+      parts.push(`<div class="wx-divider" id="wx-comments-total">${escapeHtml(total)}${detail.totalText ? ` · 已加载 ${detail.comments.length} 条` : ""}</div>`);
       for (let i = 0; i < detail.comments.length; i++) parts.push(commentHtml(detail.comments[i], i));
       if (!detail.comments.length) {
         if (state.loggedIn === false) {
@@ -1813,6 +1848,56 @@
       }
     }
     box.innerHTML = parts.join("");
+  }
+
+  // 更新头部「共 N 条 · 已加载 X 条」统计行（增量渲染时用，避免全量重建）
+  function updateCommentsTotalLine() {
+    const rootEl = ensureRoot();
+    const el = rootEl.querySelector("#wx-comments-total");
+    const detail = state.activeDetail;
+    if (!el || !detail || !detail.comments) return;
+    const total = detail.totalText || `共 ${detail.comments.length} 条评论`;
+    el.textContent = total + (detail.totalText ? ` · 已加载 ${detail.comments.length} 条` : "");
+  }
+
+  // 增量追加评论节点（分批加载路径：只 append 新评论，不重排已有内容）
+  function appendCommentNodes(newComments, startIndex) {
+    const rootEl = ensureRoot();
+    const box = rootEl.querySelector("#wx-comments");
+    const detail = state.activeDetail;
+    if (!box || !detail || !detail.comments) return renderCommentsInto();
+    if (!detail.comments.length || !newComments.length) return renderCommentsInto();
+    const frag = document.createDocumentFragment();
+    newComments.forEach((c, k) => {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = commentHtml(c, startIndex + k);
+      const node = wrap.firstElementChild;
+      if (node) {
+        node.classList.add("wx-msg-new"); // 追加项滑入
+        frag.appendChild(node);
+      }
+    });
+    const status = box.querySelector("#wx-comments-status");
+    if (status) box.insertBefore(frag, status);
+    else box.appendChild(frag);
+    updateCommentsTotalLine();
+  }
+
+  // 单条替换（楼中楼展开路径：只重画该条评论，其余不动）
+  function replaceCommentNode(idx) {
+    const rootEl = ensureRoot();
+    const box = rootEl.querySelector("#wx-comments");
+    const detail = state.activeDetail;
+    if (!box || !detail || !detail.comments || !detail.comments[idx]) return renderCommentsInto();
+    const old = box.querySelector(`.wx-msg[data-idx="${idx}"]`);
+    if (!old) return renderCommentsInto();
+    const wrap = document.createElement("div");
+    wrap.innerHTML = commentHtml(detail.comments[idx], idx);
+    const node = wrap.firstElementChild;
+    if (!node) return renderCommentsInto();
+    const subs = node.querySelector(".wx-subcomments");
+    if (subs) subs.classList.add("wx-msg-new");
+    old.replaceWith(node);
   }
 
   // 详情区事件委托：只绑定一次（在 bindRootEvents 中调用），替代逐条 addEventListener
@@ -1844,6 +1929,22 @@
       },
       { passive: true }
     );
+
+    // j/k 键盘切换笔记（输入框聚焦或查看器打开时不响应）
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "j" && e.key !== "k") return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (viewerState.el) return;
+      const ae = document.activeElement;
+      if (ae && (ae.isContentEditable || ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+      if (state.navTab !== "chat" || !state.notes.length) return;
+      const curIdx = state.activeNote ? state.notes.findIndex((n) => n.noteId === state.activeNote.noteId) : -1;
+      const nextIdx = e.key === "j" ? curIdx + 1 : curIdx - 1;
+      if (nextIdx < 0 || nextIdx >= state.notes.length || nextIdx === curIdx) return;
+      openNote(state.notes[nextIdx]);
+      const itemEl = rootEl.querySelector(`.wx-item[data-noteId="${state.notes[nextIdx].noteId}"]`);
+      if (itemEl) itemEl.scrollIntoView({ block: "nearest" });
+    });
   }
 
   // 图片入场淡显：load 事件不冒泡，用捕获阶段委托（rootEl 绑定一次）
@@ -1892,26 +1993,36 @@
   }
 
   // 在引擎 iframe 中定位互动按钮：返回 {like, collect}
+  // 识别策略：特征优先（class 关键词 / 收藏文案），位置兜底（含 .count 的按钮块，第1块=赞 第2块=藏）
   function findInteractButtons(doc) {
     const box = doc.querySelector(".interact-container");
     if (!box) return {};
-    // 小红书互动栏通常为若干按钮块，每块含一个 .count；第1块=赞，第2块=收藏
-    const blocks = [...box.querySelectorAll("*")]
-      .filter((el) => {
-        if (el.children.length > 1) return false;
-        return el.querySelector(":scope > .count") || el.classList.contains("count");
-      });
-    // 直接策略：找含 .count 的最内层按钮容器
-    const holders = [];
-    for (const el of box.querySelectorAll("button, [role=button], div, span")) {
-      if (el.querySelector(":scope > .count") && !el.querySelector(":scope > * > .count")) {
-        holders.push(el);
-      }
-      if (holders.length >= 4) break;
-    }
     const result = {};
-    if (holders[0]) result.like = holders[0];
-    if (holders[1]) result.collect = holders[1];
+    // 特征匹配：class 含 like/collect 关键词，或文本为「收藏」
+    for (const el of box.querySelectorAll("button, [role=button], div, span")) {
+      const cls = (el.getAttribute("class") || "").toLowerCase();
+      if (!result.like && /(^|[\s_-])(like|like-wrapper|liked)([\s_-]|$)/.test(cls)) {
+        result.like = el;
+      }
+      if (!result.collect && /(^|[\s_-])(collect|collect-wrapper|collected|fav)([\s_-]|$)/.test(cls)) {
+        result.collect = el;
+      }
+      if (!result.collect && el.children.length <= 2 && /^收藏$/.test((el.textContent || "").trim())) {
+        result.collect = el;
+      }
+    }
+    // 位置兜底：含 .count 的最内层按钮容器，前两块依次为 赞 / 藏
+    if (!result.like || !result.collect) {
+      const holders = [];
+      for (const el of box.querySelectorAll("button, [role=button], div, span")) {
+        if (el.querySelector(":scope > .count") && !el.querySelector(":scope > * > .count")) {
+          holders.push(el);
+        }
+        if (holders.length >= 4) break;
+      }
+      if (!result.like && holders[0]) result.like = holders[0];
+      if (!result.collect && holders[1]) result.collect = holders[1];
+    }
     if (!result.like || !result.collect) {
       log("互动栏结构：", box.innerHTML.slice(0, 600));
     }
@@ -1999,15 +2110,8 @@
     const parsed = parseComments(doc);
     if (state.activeDetail && state.activeNote && state.activeNote.noteId === note.noteId) {
       state.activeDetail.comments = parsed.comments;
-      renderCommentsInto();
+      replaceCommentNode(idx); // 只重画这一条，其余评论不动
       cachePutDetail(note.noteId, state.activeDetail);
-      // 该条评论的子区域滑入提示
-      const box = ensureRoot().querySelector("#wx-comments");
-      const refreshed = box && box.querySelector(`.wx-msg[data-idx="${idx}"]`);
-      if (refreshed) {
-        const subs = refreshed.querySelector(".wx-subcomments");
-        if (subs) subs.classList.add("wx-msg-new");
-      }
     }
   }
 
@@ -2078,14 +2182,39 @@
       }
       await sleep(300);
       submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      // 校验真实出现：等 1.5s 后在评论区找这条内容；没找到再等 1.5s 二次确认。
+      // 防止风控/频率限制/审核拦截导致"静默失败"却报成功、清空用户输入
       await sleep(1500);
       if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
-      // 刷新为真实评论（成功：乐观气泡被真实数据覆盖；失败：下方回滚）
-      const parsed = parseComments(doc);
+      let parsed = parseComments(doc);
+      const isMinePosted = (list) =>
+        list.some(
+          (c) =>
+            c.content === text &&
+            (!state.myUserId || !c.userId || c.userId === state.myUserId)
+        );
+      if (!isMinePosted(parsed.comments)) {
+        await sleep(1500);
+        if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
+        parsed = parseComments(doc);
+      }
+      if (!isMinePosted(parsed.comments)) {
+        // 判定失败：保留用户输入，提示到原页确认
+        if (detail.comments && detail.comments[optimisticIdx] === optimistic) {
+          detail.comments.splice(optimisticIdx, 1);
+        }
+        input.textContent = text;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        toast("发送未确认（可能被拦截或需审核），输入已保留，可点「原页」查看", "error");
+        return;
+      }
       if (state.activeDetail) {
         state.activeDetail.comments = parsed.comments;
         renderCommentsInto();
         cachePutDetail(note.noteId, state.activeDetail);
+        // 真实数据替换乐观气泡后，滚到底部展示自己的评论
+        const bodyNow = ensureRoot().querySelector("#wx-detail-body");
+        bodyNow.scrollTop = bodyNow.scrollHeight;
       }
       input.textContent = "";
       input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2112,7 +2241,37 @@
 
   /* ============================== 图片查看器 ============================== */
 
-  let viewerState = { urls: [], index: 0, el: null };
+  let viewerState = { urls: [], index: 0, el: null, scale: 1 };
+
+  // 相邻图预加载：翻页时下一张已在缓存，无白屏等待
+  function preloadViewerNeighbors(index) {
+    const { urls } = viewerState;
+    for (const i of [index - 1, index + 1]) {
+      if (urls[i]) {
+        const pre = new Image();
+        pre.src = urls[i];
+      }
+    }
+  }
+
+  // 切图：换 src + 淡入动画（重启动画需强制 reflow）+ 复位缩放
+  function showViewerImage(index) {
+    const { urls, el } = viewerState;
+    const img = el && el.querySelector("img");
+    if (!img) return;
+    viewerState.scale = 1;
+    img.style.transform = "scale(1)";
+    img.src = urls[index];
+    img.classList.remove("wx-img-in");
+    void img.offsetWidth; // 强制 reflow 以重启动画
+    img.classList.add("wx-img-in");
+    el.querySelector(".wx-viewer-index").textContent = `${index + 1} / ${urls.length}`;
+    const left = el.querySelector(".wx-viewer-arrow.left");
+    const right = el.querySelector(".wx-viewer-arrow.right");
+    if (left) left.style.display = index > 0 ? "" : "none";
+    if (right) right.style.display = index < urls.length - 1 ? "" : "none";
+    preloadViewerNeighbors(index);
+  }
 
   function openImageViewer(index, urls) {
     closeImageViewer();
@@ -2127,11 +2286,24 @@
       <div class="wx-viewer-index"></div>
     `;
     rootEl.appendChild(viewer);
-    viewerState = { urls, index, el: viewer };
+    viewerState = { urls, index, el: viewer, scale: 1 };
 
     const img = viewer.querySelector("img");
-    img.src = urls[index];
-    viewer.querySelector(".wx-viewer-index").textContent = `${index + 1} / ${urls.length}`;
+    img.addEventListener("dblclick", () => {
+      viewerState.scale = 1;
+      img.style.transform = "scale(1)";
+    });
+    // 滚轮缩放（40% ~ 400%，双击复位）
+    viewer.addEventListener(
+      "wheel",
+      (e) => {
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        viewerState.scale = Math.max(0.4, Math.min(4, viewerState.scale * factor));
+        img.style.transform = "scale(" + viewerState.scale + ")";
+      },
+      { passive: false }
+    );
 
     viewer.addEventListener("click", (e) => {
       if (e.target === viewer || e.target.classList.contains("wx-viewer-close")) closeImageViewer();
@@ -2140,6 +2312,7 @@
     const right = viewer.querySelector(".wx-viewer-arrow.right");
     if (left) left.addEventListener("click", () => stepViewer(-1));
     if (right) right.addEventListener("click", () => stepViewer(1));
+    showViewerImage(index);
     document.addEventListener("keydown", viewerKeyHandler);
   }
 
@@ -2157,12 +2330,7 @@
     next = Math.max(0, Math.min(urls.length - 1, next));
     if (next === viewerState.index) return;
     viewerState.index = next;
-    el.querySelector("img").src = urls[next];
-    el.querySelector(".wx-viewer-index").textContent = `${next + 1} / ${urls.length}`;
-    const left = el.querySelector(".wx-viewer-arrow.left");
-    const right = el.querySelector(".wx-viewer-arrow.right");
-    if (left) left.style.display = next > 0 ? "" : "none";
-    if (right) right.style.display = next < urls.length - 1 ? "" : "none";
+    showViewerImage(next);
   }
 
   function closeImageViewer() {
@@ -2289,6 +2457,19 @@
       getMyProfileFromDom();
       applyMyProfileToUi();
     }, 4000);
+    // 空闲预热：浏览器空闲时预取/预热列表第一条（未悬停直接点击的首开提速）
+    if (typeof requestIdleCallback === "function") {
+      requestIdleCallback(
+        () => {
+          const first = state.notes.find((n) => !detailCache.get(n.noteId));
+          if (!first) return;
+          prefetchNoteDetail(first);
+          warmFrameFor(first);
+          log("空闲预热完成：", first.noteId);
+        },
+        { timeout: 5000 }
+      );
+    }
     log("微信模式已启动");
   }
 
