@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.4.1
+// @version      0.5.0
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -37,6 +37,7 @@
     collectedMap: "xhsWxCollectedMap",
     dark: "xhsWxDark",
     fontScale: "xhsWxFontScale",
+    followPrefetch: "xhsWxFollowPrefetch",
   };
 
   /* ============================== 工具 ============================== */
@@ -1082,7 +1083,16 @@
     fetchNoteDetail(note)
       .then((detail) => {
         prefetchDone.add(note.noteId);
-        if (detail) cachePutDetail(note.noteId, { ...detail, comments: [] });
+        if (detail) {
+          // comments 必须是 undefined（表示"正文就绪、评论未拉"），
+          // openNote 命中缓存后会据此继续走 iframe 评论加载；存 [] 会被当成"无评论"
+          cachePutDetail(note.noteId, { ...detail, comments: undefined });
+          // 图片预灌：把九宫格缩略图灌进浏览器缓存，点开时第一帧从内存直出
+          for (const u of detail.images || []) {
+            const pre = new Image();
+            pre.src = cdnThumb(u, 480);
+          }
+        }
         log("预取完成：", note.noteId);
       })
       .catch(() => { /* 静默，点击时会正常重试 */ })
@@ -1448,12 +1458,30 @@
 
   /* ============================== 打开笔记 & 渲染 ============================== */
 
+  /* 跟读预取（深度 1）：打开第 i 条时自动预取下一条的正文+图片并预热其页面。
+   * feed 顺序浏览的预测式预取——点开下一条时正文/图片/评论大概率已就绪。
+   * 保护：设置可关；页面切后台暂停；预热延迟 1.5s 错峰（不与当前笔记的加载抢带宽） */
+  function followUpPrefetch(currentNote) {
+    if (storeGet(STORE_KEYS.followPrefetch, true) === false) return;
+    if (document.hidden) return;
+    const idx = state.notes.findIndex((n) => n.noteId === currentNote.noteId);
+    if (idx < 0 || idx + 1 >= state.notes.length) return;
+    const next = state.notes[idx + 1];
+    prefetchNoteDetail(next); // 正文+图片（轻，立即）
+    setTimeout(() => {
+      if (document.hidden) return;                 // 后台暂停
+      if (storeGet(STORE_KEYS.followPrefetch, true) === false) return;
+      if (!detailCache.get(next.noteId)) warmFrameFor(next); // 页面预热（重，错峰）
+    }, 1500);
+  }
+
   async function openNote(note) {
     state.activeNote = note;
     markNoteSeen(note);
     updateListItemState(note); // 增量更新高亮与未读点，不重建列表
     resetCommentPaging();      // 重置评论分批状态
     promoteWarmFrame(note);    // warm 帧恰好预热了这篇则提升为引擎，复用已加载页面
+    followUpPrefetch(note);    // 跟读预取：后台备好下一条
     const rootEl = ensureRoot();
     const composer = rootEl.querySelector("#wx-composer");
     const titleEl = rootEl.querySelector("#wx-detail-title");
@@ -2399,6 +2427,8 @@
       <h3>外观</h3>
       <div class="row"><span>暗黑模式</span><button class="neutral" id="wx-set-dark">${isDark() ? "当前：暗黑 · 切浅色" : "当前：浅色 · 切暗黑"}</button></div>
       <div class="row"><span>左栏宽度</span><button id="wx-set-width">重置宽度</button></div>
+      <h3>性能</h3>
+      <div class="row"><span>跟读预取（自动备好下一条）</span><button class="neutral" id="wx-set-follow">${storeGet(STORE_KEYS.followPrefetch, true) === false ? "已关 · 开启" : "已开 · 关闭"}</button></div>
       <div class="row"><span>清除已读记录</span><button id="wx-set-clear-seen">清除</button></div>
       <h3>账号</h3>
       <div class="row"><span>当前身份</span><span style="color:#666">${escapeHtml(state.myNickname || state.myUserId || "未识别")}</span></div>
@@ -2422,6 +2452,12 @@
       document.getElementById("wx-aside").style.width = "300px";
       storeSet(STORE_KEYS.leftWidth, 300);
       toast("已重置宽度", "success");
+    });
+    wrap.querySelector("#wx-set-follow").addEventListener("click", (e) => {
+      const next = storeGet(STORE_KEYS.followPrefetch, true) !== false; // 当前开 -> 关
+      storeSet(STORE_KEYS.followPrefetch, !next);
+      e.target.textContent = !next ? "已开 · 关闭" : "已关 · 开启";
+      toast(next ? "跟读预取已关闭" : "跟读预取已开启", "success");
     });
     wrap.querySelector("#wx-set-clear-seen").addEventListener("click", () => {
       GM_deleteValue(STORE_KEYS.seenMap);
