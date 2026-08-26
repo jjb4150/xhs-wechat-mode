@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.4.0
+// @version      0.4.1
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -1413,12 +1413,9 @@
   }
 
   function parseOneComment(item) {
-    // 字段按文档序取第一个（当前评论的节点在楼中楼之前）
+    // 字段按文档序取第一个（当前评论的节点在楼中楼之前）；无 .name 时回退用 author 区文本
     const authorBox = item.querySelector(".author");
     const nameEl = authorBox && authorBox.querySelector(".name");
-    if (!nameEl && authorBox && authorBox.closest("a")) {
-      // 结构变体：author 链接本身带名字
-    }
     const nameFallback = authorBox ? authorBox.textContent.trim() : "";
     const name = nameEl ? nameEl.textContent.trim() : nameFallback;
     if (!name) return null;
@@ -1624,6 +1621,12 @@
     return 0;
   }
 
+  // 评论唯一键（增量渲染的锚点比对用）
+  function commentKey(c) {
+    if (!c) return "\u0000";
+    return (c.userId || c.author || "") + "|" + (c.content || "").slice(0, 80);
+  }
+
   // 详情区滚动到底时自动加载下一页评论
   let commentsLoadingMore = false;
   let commentsNoMore = false;
@@ -1642,14 +1645,20 @@
       if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
       if (added > 0) {
         const parsed = parseComments(doc);
-        const prevLen = (state.activeDetail && state.activeDetail.comments) ? state.activeDetail.comments.length : 0;
-        const fresh = parsed.comments.slice(prevLen);
+        const prevComments = (state.activeDetail && state.activeDetail.comments) || [];
+        const prevLen = prevComments.length;
+        // 头部插入检测：新结果的第 prevLen-1 条必须仍是原来的最后一条（锚点比对），
+        // 保证增量追加安全；锚点对不上说明结构变化（如头部插入/重排），走全量重绘
+        const anchorOk =
+          prevLen > 0 &&
+          parsed.comments.length > prevLen &&
+          commentKey(parsed.comments[prevLen - 1]) === commentKey(prevComments[prevLen - 1]);
         state.activeDetail.comments = parsed.comments;
         state.activeDetail.totalText = parsed.totalText;
-        if (fresh.length && parsed.comments.length === prevLen + fresh.length) {
-          appendCommentNodes(fresh, prevLen); // 增量追加，不重排已有评论
+        if (anchorOk) {
+          appendCommentNodes(parsed.comments.slice(prevLen), prevLen); // 增量追加，不重排已有评论
         } else {
-          renderCommentsInto(); // 结构异常（如头部插入）时全量兜底
+          renderCommentsInto(); // 首批（prevLen=0）或结构变化时全量渲染
         }
         cachePutDetail(note.noteId, state.activeDetail);
         setMoreCommentsStatus("");
@@ -1690,12 +1699,21 @@
     try {
       const interactEl = doc.querySelector(".interact-container");
       if (!interactEl) return {};
+      // 与 findInteractButtons 同步的特征化识别，位置取数仅作兜底
+      const btns = findInteractButtons(doc);
+      const countOf = (el) => {
+        if (!el) return "";
+        const c = el.querySelector(":scope .count") || el.querySelector(".count");
+        return c ? c.textContent.trim() : "";
+      };
       const counts = [...interactEl.querySelectorAll(".count")].map((el) => el.textContent.trim());
-      const liked = !!interactEl.querySelector(".like-active, .active");
+      const liked = btns.like
+        ? /like-active|\bactive\b/.test(String(btns.like.className || ""))
+        : !!interactEl.querySelector(".like-active");
       return {
         interact: {
-          likedCount: counts[0] || "",
-          collectedCount: counts[1] || "",
+          likedCount: countOf(btns.like) || counts[0] || "",
+          collectedCount: countOf(btns.collect) || counts[1] || "",
           commentCount: counts[2] || "",
           liked,
         },
@@ -1942,12 +1960,10 @@
       const nextIdx = e.key === "j" ? curIdx + 1 : curIdx - 1;
       if (nextIdx < 0 || nextIdx >= state.notes.length || nextIdx === curIdx) return;
       openNote(state.notes[nextIdx]);
-      const itemEl = rootEl.querySelector(`.wx-item[data-noteId="${state.notes[nextIdx].noteId}"]`);
+      const itemEl = rootEl.querySelector(`.wx-item[data-note-id="${state.notes[nextIdx].noteId}"]`);
       if (itemEl) itemEl.scrollIntoView({ block: "nearest" });
     });
   }
-
-  // 图片入场淡显：load 事件不冒泡，用捕获阶段委托（rootEl 绑定一次）
 
   function updateInteractButtons() {
     const rootEl = ensureRoot();
@@ -2199,9 +2215,10 @@
         parsed = parseComments(doc);
       }
       if (!isMinePosted(parsed.comments)) {
-        // 判定失败：保留用户输入，提示到原页确认
+        // 判定失败：移除乐观气泡并重绘、保留用户输入，提示到原页确认
         if (detail.comments && detail.comments[optimisticIdx] === optimistic) {
           detail.comments.splice(optimisticIdx, 1);
+          renderCommentsInto(); // 重绘，清掉 DOM 里残留的"发送中…"气泡
         }
         input.textContent = text;
         input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2241,7 +2258,15 @@
 
   /* ============================== 图片查看器 ============================== */
 
-  let viewerState = { urls: [], index: 0, el: null, scale: 1 };
+  let viewerState = { urls: [], index: 0, el: null, scale: 1, tx: 0, ty: 0 };
+
+  // 应用查看器变换（缩放 + 平移）
+  function applyViewerTransform() {
+    const img = viewerState.el && viewerState.el.querySelector("img");
+    if (img) {
+      img.style.transform = `translate(${viewerState.tx}px, ${viewerState.ty}px) scale(${viewerState.scale})`;
+    }
+  }
 
   // 相邻图预加载：翻页时下一张已在缓存，无白屏等待
   function preloadViewerNeighbors(index) {
@@ -2254,13 +2279,15 @@
     }
   }
 
-  // 切图：换 src + 淡入动画（重启动画需强制 reflow）+ 复位缩放
+  // 切图：换 src + 淡入动画（重启动画需强制 reflow）+ 复位缩放与平移
   function showViewerImage(index) {
     const { urls, el } = viewerState;
     const img = el && el.querySelector("img");
     if (!img) return;
     viewerState.scale = 1;
-    img.style.transform = "scale(1)";
+    viewerState.tx = 0;
+    viewerState.ty = 0;
+    applyViewerTransform();
     img.src = urls[index];
     img.classList.remove("wx-img-in");
     void img.offsetWidth; // 强制 reflow 以重启动画
@@ -2286,13 +2313,16 @@
       <div class="wx-viewer-index"></div>
     `;
     rootEl.appendChild(viewer);
-    viewerState = { urls, index, el: viewer, scale: 1 };
+    viewerState = { urls, index, el: viewer, scale: 1, tx: 0, ty: 0 };
 
     const img = viewer.querySelector("img");
-    img.addEventListener("dblclick", () => {
+    const resetViewerTransform = () => {
       viewerState.scale = 1;
-      img.style.transform = "scale(1)";
-    });
+      viewerState.tx = 0;
+      viewerState.ty = 0;
+      applyViewerTransform();
+    };
+    img.addEventListener("dblclick", resetViewerTransform);
     // 滚轮缩放（40% ~ 400%，双击复位）
     viewer.addEventListener(
       "wheel",
@@ -2300,10 +2330,29 @@
         e.preventDefault();
         const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
         viewerState.scale = Math.max(0.4, Math.min(4, viewerState.scale * factor));
-        img.style.transform = "scale(" + viewerState.scale + ")";
+        applyViewerTransform();
       },
       { passive: false }
     );
+    // 放大后拖拽平移（scale <= 1 时拖拽无效，避免误触关闭）
+    let dragging = false;
+    let dragStart = null;
+    viewer.addEventListener("mousedown", (e) => {
+      if (viewerState.scale <= 1 || e.target !== img) return;
+      dragging = true;
+      dragStart = { x: e.clientX, y: e.clientY, tx: viewerState.tx, ty: viewerState.ty };
+      e.preventDefault();
+    });
+    viewer.addEventListener("mousemove", (e) => {
+      if (!dragging || !dragStart) return;
+      viewerState.tx = dragStart.tx + (e.clientX - dragStart.x);
+      viewerState.ty = dragStart.ty + (e.clientY - dragStart.y);
+      applyViewerTransform();
+    });
+    viewer.addEventListener("mouseup", () => {
+      dragging = false;
+      dragStart = null;
+    });
 
     viewer.addEventListener("click", (e) => {
       if (e.target === viewer || e.target.classList.contains("wx-viewer-close")) closeImageViewer();
@@ -2358,7 +2407,8 @@
       <div class="hint">
         说明：本脚本的评论/点赞/收藏通过页面自身能力完成，不会伪造请求。<br/>
         若笔记或评论加载失败，多为网络或登录态问题，刷新页面即可。<br/>
-        v0.1 仅支持首页“发现”feed，其他页面（搜索/个人主页）保持原样。
+        快捷键：j / k 上下切换笔记；图片查看器支持滚轮缩放、拖拽平移、双击复位。<br/>
+        目前仅支持首页"发现" feed，其他页面（搜索/个人主页）保持原样。
       </div>
     `;
     list.innerHTML = "";
@@ -2457,18 +2507,27 @@
       getMyProfileFromDom();
       applyMyProfileToUi();
     }, 4000);
-    // 空闲预热：浏览器空闲时预取/预热列表第一条（未悬停直接点击的首开提速）
+    // 空闲预热：浏览器空闲时预取/预热列表第一条（未悬停直接点击的首开提速）。
+    // feed 尚未扫出时延迟重试（最多 3 次）
     if (typeof requestIdleCallback === "function") {
-      requestIdleCallback(
-        () => {
-          const first = state.notes.find((n) => !detailCache.get(n.noteId));
-          if (!first) return;
-          prefetchNoteDetail(first);
-          warmFrameFor(first);
-          log("空闲预热完成：", first.noteId);
-        },
-        { timeout: 5000 }
-      );
+      const warmFirstIdle = (attempt) => {
+        requestIdleCallback(
+          () => {
+            const first = state.notes.find((n) => !detailCache.get(n.noteId));
+            if (!first) {
+              if (attempt < 3 && !state.notes.length) {
+                setTimeout(() => warmFirstIdle(attempt + 1), 2500);
+              }
+              return;
+            }
+            prefetchNoteDetail(first);
+            warmFrameFor(first);
+            log("空闲预热完成：", first.noteId);
+          },
+          { timeout: 5000 }
+        );
+      };
+      warmFirstIdle(0);
     }
     log("微信模式已启动");
   }
