@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.3.4
+// @version      0.3.5
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -576,6 +576,7 @@
     myUserId: "",
     myNickname: "",
     myAvatar: "",
+    loggedIn: null,      // null=未知，true/false 来自 SSR user.loggedIn 与侧栏 DOM
     keyword: "",
     listBottomHits: 0,
     frameSeq: 0,          // iframe 加载序号（防切换错乱）
@@ -588,6 +589,7 @@
       // 侧边栏真实容器为 .channel-list-content（实测），"我"的入口是其内的 /user/profile/ 链接
       const link = document.querySelector('.channel-list-content a[href*="/user/profile/"]');
       if (link) {
+        state.loggedIn = true; // 侧边栏有"我"的入口 = 已登录
         state.myUserId = uidFromProfileHref(link.getAttribute("href")) || state.myUserId;
         const img = link.querySelector("img");
         if (img && (img.src || img.getAttribute("data-src"))) {
@@ -602,6 +604,7 @@
   function extractMyProfileFromState(stateJson) {
     try {
       const u = stateJson && stateJson.user;
+      if (u && typeof u.loggedIn === "boolean") state.loggedIn = u.loggedIn; // 登录态权威来源
       if (!u || !u.userInfo || !u.userInfo.userId) {
         log("SSR 身份提取：未取到 userInfo（loggedIn=", u && u.loggedIn, "）");
         return false;
@@ -1012,8 +1015,8 @@
       ${isUnread ? '<span class="wx-item-unread"></span>' : ""}
     `;
     div.addEventListener("click", () => openNote(note));
-    // 悬停预取：停留 400ms 提前拉正文数据；停留 650ms 预热引擎 iframe（评论请求随页面自动发出）
-    // 点击同一条时 iframe 直接复用（loadNoteInFrame 的 alreadyThere 分支），评论大幅提速
+    // 悬停预取：停留 400ms 提前拉正文数据；停留 650ms 用 warm 帧预热笔记页（评论请求随页面自动发出）。
+    // 预热只动 warm 帧，不会打断正在打开的笔记；点击时 promoteWarmFrame 自动复用
     let hoverTimer = null;
     let warmTimer = null;
     div.addEventListener("mouseenter", () => {
@@ -1022,8 +1025,7 @@
       hoverTimer = setTimeout(() => prefetchNoteDetail(note), 400);
       warmTimer = setTimeout(() => {
         if (detailCache.get(note.noteId)) return; // 已有完整缓存则无需预热
-        loadNoteInFrame(note, { waitComments: false }).catch(() => { /* 静默 */ });
-        log("iframe 预热：", note.noteId);
+        warmFrameFor(note);
       }, 650);
     });
     div.addEventListener("mouseleave", () => {
@@ -1213,11 +1215,13 @@
 
   /* ============================== 笔记加载：评论（iframe 引擎） ============================== */
 
-  function ensureEngineFrame() {
-    let frame = document.getElementById("xhs-wx-engine");
+  // 双帧设计：engine（正式引擎，承载评论解析与互动操作）+ warm（预热专用）。
+  // 悬停预热只驱动 warm 帧，绝不打断 engine；点击时若 warm 已是该笔记则「提升」为 engine（交换身份）
+  function ensureFrame(frameId) {
+    let frame = document.getElementById(frameId);
     if (!frame) {
       frame = document.createElement("iframe");
-      frame.id = "xhs-wx-engine";
+      frame.id = frameId;
       Object.assign(frame.style, {
         position: "fixed",
         left: "0",
@@ -1233,9 +1237,42 @@
       frame.setAttribute("aria-hidden", "true");
       frame.setAttribute("tabindex", "-1");
       (document.body || document.documentElement).appendChild(frame);
-      log("引擎 iframe 已创建");
+      log("iframe 已创建：", frameId);
     }
     return frame;
+  }
+
+  function ensureEngineFrame() {
+    return ensureFrame("xhs-wx-engine");
+  }
+
+  // 悬停预热：仅驱动 warm 帧（fire-and-forget，不参与等待逻辑，不影响 frameSeq）
+  function warmFrameFor(note) {
+    try {
+      const warm = ensureFrame("xhs-wx-warm");
+      try {
+        const href = warm.contentWindow && warm.contentWindow.location && warm.contentWindow.location.href;
+        if (href && href.includes(note.noteId)) return; // 该笔记已在预热中
+      } catch (e) { /* 忽略 */ }
+      warm.src = note.url;
+      log("warm 帧预热：", note.noteId);
+    } catch (e) { /* 忽略 */ }
+  }
+
+  // 打开笔记前调用：若 warm 帧恰好已加载该笔记，把它提升为 engine（原 engine 退位为 warm）
+  function promoteWarmFrame(note) {
+    try {
+      const warm = document.getElementById("xhs-wx-warm");
+      if (!warm) return;
+      const href = warm.contentWindow && warm.contentWindow.location && warm.contentWindow.location.href;
+      if (!href || !href.includes(note.noteId)) return;
+      const engine = document.getElementById("xhs-wx-engine");
+      const tmpId = "xhs-wx-swap";
+      warm.id = tmpId;
+      if (engine) engine.id = "xhs-wx-warm";
+      warm.id = "xhs-wx-engine";
+      log("预热帧已提升为引擎：", note.noteId);
+    } catch (e) { /* 忽略 */ }
   }
 
   // 加载笔记到 iframe，等待正文+评论渲染完成，返回 doc
@@ -1382,6 +1419,7 @@
     markNoteSeen(note);
     updateListItemState(note); // 增量更新高亮与未读点，不重建列表
     resetCommentPaging();      // 重置评论分批状态
+    promoteWarmFrame(note);    // warm 帧恰好预热了这篇则提升为引擎，复用已加载页面
     const rootEl = ensureRoot();
     const composer = rootEl.querySelector("#wx-composer");
     const titleEl = rootEl.querySelector("#wx-detail-title");
@@ -1756,7 +1794,8 @@
 
     const parts = [];
     if (detail.commentError) {
-      parts.push(`<div class="wx-divider">评论加载失败：${escapeHtml(detail.commentError)}</div>`);
+      const loginHint = state.loggedIn === false ? "（检测到未登录：请先登录小红书后刷新页面）" : "";
+      parts.push(`<div class="wx-divider">评论加载失败：${escapeHtml(detail.commentError)}${escapeHtml(loginHint)}</div>`);
     } else if (!detail.comments) {
       parts.push(`<div class="wx-divider">评论加载中…</div>`);
     } else {
@@ -1764,7 +1803,11 @@
       parts.push(`<div class="wx-divider">${escapeHtml(total)}${detail.totalText ? ` · 已加载 ${detail.comments.length} 条` : ""}</div>`);
       for (let i = 0; i < detail.comments.length; i++) parts.push(commentHtml(detail.comments[i], i));
       if (!detail.comments.length) {
-        parts.push(`<div class="wx-divider">还没有评论，抢首评</div>`);
+        if (state.loggedIn === false) {
+          parts.push(`<div class="wx-divider">🔍 未检测到登录态：请点右上「原页」登录小红书，然后刷新本页</div>`);
+        } else {
+          parts.push(`<div class="wx-divider">还没有评论，抢首评</div>`);
+        }
       } else if (!commentsNoMore) {
         parts.push(`<div class="wx-divider" id="wx-comments-status">↓ 下滑加载更多评论</div>`);
       }
