@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.6.0
+// @version      0.6.1
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -480,6 +480,17 @@
 #xhs-wx-root .wx-bubble,
 #xhs-wx-root .wx-composer-inner,
 #xhs-wx-root .wx-search input { transition: background-color .25s ease, color .25s ease, border-color .25s ease; }
+
+/* 评论富内容：小表情内联；评论图片块级可点开 */
+#xhs-wx-root .wx-bubble .wx-c-emoji {
+  display: inline-block; width: 20px; height: 20px;
+  vertical-align: -5px; margin: 0 1px;
+}
+#xhs-wx-root .wx-bubble .wx-c-img {
+  display: block; max-width: 220px; max-height: 220px;
+  border-radius: 6px; margin-top: 6px; cursor: zoom-in;
+}
+#xhs-wx-root .wx-subcomment .wx-c-emoji { width: 16px; height: 16px; vertical-align: -3px; }
 
 /* 千评热帖滚动优化（v0.3.0 曾因吞楼中楼移除，此次只作用于气泡内容层：
    楼中楼在气泡内部随父层渲染不受影响； contain-intrinsic-size 给出估算尺寸避免滚动条跳动。
@@ -1479,10 +1490,43 @@
       userId: uidFromProfileHref(authorHref),
       avatar,
       content: contentEl ? contentEl.textContent.trim() : "",
+      // 富内容 HTML：按原位置内联表情图/评论图片（textContent 会把图全部丢掉）
+      contentHtml: serializeCommentContent(contentEl),
       date: dateEl ? dateEl.textContent.trim() : "",
       likeText: likeEl ? likeEl.textContent.trim() : "",
       isAuthor,
     };
+  }
+
+  // 评论富内容序列化：文字转义保留，img 按类型标记（emoji 小表情内联；普通图片块级可点开），br 转换行
+  function serializeCommentContent(el) {
+    if (!el) return "";
+    const parts = [];
+    const walk = (node) => {
+      for (const child of node.childNodes) {
+        if (child.nodeType === 3) {
+          // 文本节点
+          parts.push(escapeHtml(child.textContent));
+        } else if (child.nodeType === 1) {
+          const tag = child.tagName;
+          if (tag === "IMG") {
+            const src = child.getAttribute("src") || child.getAttribute("data-src") || "";
+            if (src) {
+              const isEmoji = /emoji/i.test(child.getAttribute("class") || "");
+              parts.push(
+                `<img class="${isEmoji ? "wx-c-emoji" : "wx-c-img"}" src="${escapeHtml(src)}" alt=""/>`
+              );
+            }
+          } else if (tag === "BR") {
+            parts.push("\n");
+          } else {
+            walk(child); // 嵌套容器递归
+          }
+        }
+      }
+    };
+    walk(el);
+    return parts.join("").trim();
   }
 
   /* ============================== 打开笔记 & 渲染 ============================== */
@@ -1867,7 +1911,7 @@
         ${c.avatar ? `<img class="wx-avatar" src="${escapeHtml(c.avatar)}" alt=""/>` : `<div class="wx-avatar"></div>`}
         <div class="wx-msg-body">
           <div class="wx-msg-name">${c.isAuthor ? '<span class="wx-badge">作者</span>' : ""}${name}</div>
-          <div class="wx-bubble">${escapeHtml(c.content)}</div>
+          <div class="wx-bubble">${c.contentHtml || escapeHtml(c.content)}</div>
           ${subCommentsHtml(c)}
           <div class="wx-bubble-meta">
             <span>${escapeHtml(c.date || "")}</span>
@@ -1887,7 +1931,7 @@
           .map(
             (s) => `
           <div class="wx-subcomment">
-            <div><span class="who ${s.isAuthor ? "author-tag" : ""}">${escapeHtml(s.author)}</span>${escapeHtml(s.content)}</div>
+            <div><span class="who ${s.isAuthor ? "author-tag" : ""}">${escapeHtml(s.author)}</span>${s.contentHtml || escapeHtml(s.content)}</div>
             <div class="sub-meta">${escapeHtml(s.date || "")}${s.likeText ? " · ♥ " + escapeHtml(s.likeText) : ""}</div>
           </div>`
           )
@@ -2016,8 +2060,10 @@
     body.addEventListener("click", (e) => {
       const img = e.target.closest("img[data-viewer]");
       if (img) {
-        const group = [...img.closest("[data-imgs]").querySelectorAll("img")];
-        const urls = group.map((el) => el.getAttribute("data-full") || el.getAttribute("src")).filter(Boolean);
+        const group = img.closest("[data-imgs]");
+        // 九宫格：整组可翻页；评论图片：单张打开
+        const imgs = group ? [...group.querySelectorAll("img")] : [img];
+        const urls = imgs.map((el) => el.getAttribute("data-full") || el.getAttribute("src")).filter(Boolean);
         openImageViewer(urls.indexOf(img.getAttribute("data-full") || img.getAttribute("src")), urls);
         return;
       }
