@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.6.3
+// @version      0.6.4
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -1489,6 +1489,12 @@
     }
     // “作者”徽标：author 区域内出现红色小标签文本“作者”
     const isAuthor = !!authorBox && /(^|\s)作者(\s|$)/.test(authorBox.textContent || "");
+    // 用户上传的评论图片：不在 .content 内，而在平级的 .comment-picture 容器（实测结构）；
+    // 顶层评论需排除楼中楼（.reply-container）内的图片
+    const commentImages = [...item.querySelectorAll(".comment-picture img")]
+      .filter((im) => !im.closest(".reply-container"))
+      .map((im) => (im.getAttribute("src") || im.getAttribute("data-src") || "").replace(/^http:\/\//i, "https://"))
+      .filter(Boolean);
     return {
       author: name,
       authorUrl: authorHref ? new URL(authorHref, "https://www.xiaohongshu.com").href : "",
@@ -1497,6 +1503,7 @@
       content: contentEl ? contentEl.textContent.trim() : "",
       // 富内容 HTML：按原位置内联表情图/评论图片（textContent 会把图全部丢掉）
       contentHtml: serializeCommentContent(contentEl),
+      commentImages,
       date: dateEl ? dateEl.textContent.trim() : "",
       likeText: likeEl ? likeEl.textContent.trim() : "",
       isAuthor,
@@ -1983,7 +1990,12 @@
         ${c.avatar ? `<img class="wx-avatar" src="${escapeHtml(c.avatar)}" alt=""/>` : `<div class="wx-avatar"></div>`}
         <div class="wx-msg-body">
           <div class="wx-msg-name">${c.isAuthor ? '<span class="wx-badge">作者</span>' : ""}${name}</div>
-          <div class="wx-bubble">${c.contentHtml || escapeHtml(c.content)}</div>
+          <div class="wx-bubble">${c.contentHtml || escapeHtml(c.content)}${(c.commentImages || [])
+            .map(
+              (u) =>
+                `<img class="wx-c-img" loading="lazy" src="${escapeHtml(u)}" data-viewer alt=""/>`
+            )
+            .join("")}</div>
           ${subCommentsHtml(c)}
           <div class="wx-bubble-meta">
             <span>${escapeHtml(c.date || "")}</span>
@@ -2003,7 +2015,12 @@
           .map(
             (s) => `
           <div class="wx-subcomment">
-            <div><span class="who ${s.isAuthor ? "author-tag" : ""}">${escapeHtml(s.author)}</span>${s.contentHtml || escapeHtml(s.content)}</div>
+            <div><span class="who ${s.isAuthor ? "author-tag" : ""}">${escapeHtml(s.author)}</span>${s.contentHtml || escapeHtml(s.content)}${(s.commentImages || [])
+              .map(
+                (u) =>
+                  `<img class="wx-c-img" loading="lazy" src="${escapeHtml(u)}" data-viewer alt=""/>`
+              )
+              .join("")}</div>
             <div class="sub-meta">${escapeHtml(s.date || "")}${s.likeText ? " · ♥ " + escapeHtml(s.likeText) : ""}</div>
           </div>`
           )
