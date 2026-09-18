@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.6.2
+// @version      0.6.3
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -1114,7 +1114,9 @@
   // 预取正文（单并发，避免悬停扫过一排时并发拉一堆）
   let prefetchInFlight = false;
   const prefetchDone = new Set();
+  let prefetchCooldownUntil = 0; // fetch 失败（可能限流）后的冷却期，暂停一切预取/预热
   function prefetchNoteDetail(note) {
+    if (Date.now() < prefetchCooldownUntil) return;
     if (prefetchDone.has(note.noteId) || detailCache.get(note.noteId)) return;
     if (prefetchInFlight) return;
     prefetchInFlight = true;
@@ -1133,7 +1135,11 @@
         }
         log("预取完成：", note.noteId);
       })
-      .catch(() => { /* 静默，点击时会正常重试 */ })
+      .catch(() => {
+        // 预取失败多为限流信号：冷却 60s，暂停预取与预热，给正常浏览让路
+        prefetchCooldownUntil = Date.now() + 60 * 1000;
+        log("预取失败，进入 60s 冷却");
+      })
       .finally(() => { prefetchInFlight = false; });
   }
 
@@ -1333,6 +1339,7 @@
 
   // 悬停预热：仅驱动 warm 帧（fire-and-forget，不参与等待逻辑，不影响 frameSeq）
   function warmFrameFor(note) {
+    if (Date.now() < prefetchCooldownUntil) return; // 冷却期：预热也暂停
     try {
       const warm = ensureFrame("xhs-wx-warm");
       try {
@@ -1611,6 +1618,7 @@
           updateInteractButtons();
           cachePutDetail(note.noteId, state.activeDetail);
           releasePendingWarm(); // 引擎空闲，启动下一条的预热
+      setTimeout(() => maybeLoadMoreComments(), 600); // 评论首屏就位后自动续载
         } catch (e) {
           releasePendingWarm(); // 加载失败也让出引擎
           if (state.activeNote && state.activeNote.noteId === note.noteId) {
@@ -1650,12 +1658,17 @@
     try {
       const { doc } = await loadNoteInFrame(note, { waitComments: true });
       if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
-      // SSR 失败时从 iframe DOM 兜底解析正文
+      // 正文兜底（SSR fetch 失败/被限流时）：优先从 iframe 文档内嵌的 __INITIAL_STATE__
+      // 提取（与主路径同源、最可靠），失败再退 DOM 解析
       if (!detail || !detail.desc) {
-        const fallback = parseNoteFromFrameDoc(doc);
+        let fallback = extractInitialStateFromDoc(doc);
+        if (!fallback) fallback = parseNoteFromFrameDoc(doc);
         if (fallback) {
           state.activeDetail = { ...fallback, ...state.activeDetail, comments: state.activeDetail.comments };
-          renderDetailShell(); // 重画一次正文（仅失败兜底场景）
+          withViewTransition(() => renderDetailShell()); // 重画一次正文（仅失败兜底场景）
+        } else if (!detail) {
+          state.activeDetail.bodyError = true; // 全部兜底失败：明确告知而非“（无正文）”
+          withViewTransition(() => renderDetailShell());
         }
       }
       // 用 iframe 里的实时数据修正互动状态（点赞状态 SSR 里拿到的可能不准）
@@ -1671,6 +1684,7 @@
       updateInteractButtons();
       cachePutDetail(note.noteId, state.activeDetail);
       releasePendingWarm(); // 引擎空闲，启动下一条的预热
+      setTimeout(() => maybeLoadMoreComments(), 600); // 评论首屏就位后自动续载
       log("评论加载完成：", parsed.comments.length, "条一级评论");
     } catch (e) {
       warn("评论加载失败", e);
@@ -1683,6 +1697,25 @@
   }
 
   // SSR 失败时从 iframe 渲染结果兜底解析正文（尽力而为）
+  // 优先级更高的路径：iframe 文档内嵌的 __INITIAL_STATE__（与主路径同源）
+  function extractInitialStateFromDoc(doc) {
+    try {
+      const html = doc.documentElement.innerHTML;
+      const m = /window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*<\/script>/.exec(html);
+      if (!m) return null;
+      const stateJson = new Function("return (" + m[1] + ");")();
+      const detailMap = stateJson && stateJson.note && stateJson.note.noteDetailMap;
+      if (!detailMap) return null;
+      const entry = Object.values(detailMap)[0];
+      const nd = entry && entry.note;
+      if (!nd) return null;
+      log("iframe 内嵌状态兜底成功");
+      return normalizeNoteData(nd);
+    } catch (e) {
+      return null;
+    }
+  }
+
   function parseNoteFromFrameDoc(doc) {
     try {
       const titleEl = doc.querySelector("#detail-desc .title, .note-content .title");
@@ -1764,6 +1797,7 @@
   // 详情区滚动到底时自动加载下一页评论
   let commentsLoadingMore = false;
   let commentsNoMore = false;
+  let commentsNoMoreAttempts = 0;
   async function maybeLoadMoreComments() {
     const note = state.activeNote;
     const detail = state.activeDetail;
@@ -1778,6 +1812,7 @@
       const added = await loadMoreComments(doc);
       if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
       if (added > 0) {
+        commentsNoMoreAttempts = 0;
         const parsed = parseComments(doc);
         const prevComments = (state.activeDetail && state.activeDetail.comments) || [];
         const prevLen = prevComments.length;
@@ -1797,13 +1832,37 @@
         cachePutDetail(note.noteId, state.activeDetail);
         setMoreCommentsStatus("");
         log("评论分批：新增", added, "条，累计", state.activeDetail.comments.length);
+        // 自动续载：用户仍在底部附近时继续拉下一批（滚动事件不会因追加内容而触发）
+        const body = ensureRoot().querySelector("#wx-detail-body");
+        if (body && body.scrollTop + body.clientHeight >= body.scrollHeight - 300) {
+          setTimeout(() => maybeLoadMoreComments(), 350);
+        }
       } else {
+        // 零新增：可能是网络慢。总数承诺还有更多时重试（最多 2 次），否则判定到底
+        commentsNoMoreAttempts++;
+        const totalPromised = parseTotalFromTotalText(detail.totalText);
+        const hasMore = !totalPromised || totalPromised > detail.comments.length;
+        if (hasMore && commentsNoMoreAttempts <= 2) {
+          setMoreCommentsStatus("网络较慢，正在重试加载评论…");
+          setTimeout(() => {
+            commentsLoadingMore = false;
+            maybeLoadMoreComments();
+            return;
+          }, 1600);
+          return;
+        }
         commentsNoMore = true;
         setMoreCommentsStatus(detail.comments.length ? "评论已全部加载" : "");
       }
     } finally {
       commentsLoadingMore = false;
     }
+  }
+
+  // 从「共 44 条评论」等文案中提取总数
+  function parseTotalFromTotalText(text) {
+    const m = /(\d+)/.exec(String(text || "").replace(/万/, "0000"));
+    return m ? parseInt(m[1], 10) : 0;
   }
 
   // 评论区底部状态行
@@ -1867,6 +1926,21 @@
       .join(" ");
 
     const images = detail.images || [];
+    // 正文占位逻辑：纯图片/视频笔记无文字是正常的，不显示占位；
+    // 只有无文字且无媒体时才提示，并区分「加载失败」与「本来就没写」
+    const hasMedia = images.length > 0 || !!detail.videoUrl;
+    let bodyText;
+    if (detail.desc) {
+      bodyText = escapeHtml(detail.desc);
+    } else if (detail.title) {
+      bodyText = "";
+    } else if (hasMedia) {
+      bodyText = "";
+    } else if (detail.bodyError) {
+      bodyText = "⚠️ 正文加载失败（可能被限流或已失效），可点右上「原页」查看，或稍后刷新重试";
+    } else {
+      bodyText = "（无正文）";
+    }
     const mediaHtml = detail.videoUrl
       ? `<video class="wx-bubble-video" controls preload="metadata" playsinline src="${escapeHtml(detail.videoUrl)}"${images[0] ? ` poster="${escapeHtml(images[0])}"` : ""}></video>`
       : images.length
@@ -1885,7 +1959,7 @@
           <div class="wx-msg-name">${escapeHtml(author.nickname || "")}</div>
           <div class="wx-bubble">
             ${detail.title ? `<div style="font-weight:600;margin-bottom:4px">${escapeHtml(detail.title)}</div>` : ""}
-            <div>${escapeHtml(detail.desc || (detail.title ? "" : "（无正文）"))}${tagsHtml ? " " + tagsHtml : ""}</div>
+            <div>${bodyText}${tagsHtml ? " " + tagsHtml : ""}</div>
             ${mediaHtml}
             <div class="wx-interact" data-interact>
               <span class="act ${interact.liked ? "on" : ""}" data-act="like" title="点赞">♥ <span class="n">${escapeHtml(fmtCount(interact.likedCount) || "0")}</span></span>
