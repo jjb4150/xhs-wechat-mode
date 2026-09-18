@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.6.1
+// @version      0.6.2
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -492,10 +492,8 @@
 }
 #xhs-wx-root .wx-subcomment .wx-c-emoji { width: 16px; height: 16px; vertical-align: -3px; }
 
-/* 千评热帖滚动优化（v0.3.0 曾因吞楼中楼移除，此次只作用于气泡内容层：
-   楼中楼在气泡内部随父层渲染不受影响； contain-intrinsic-size 给出估算尺寸避免滚动条跳动。
-   若再次出现内容缺失可删除此条 */
-#xhs-wx-root .wx-detail-body .wx-msg-body { content-visibility: auto; contain-intrinsic-size: auto 120px; }
+/* 千评热帖滚动优化：两次尝试（v0.3.0 于 .wx-msg 层、v0.6.0 于 .wx-msg-body 层）都出现楼中楼显示缺失，
+   已移除。不再重试——收益（滚动渲染）远小于风险（内容吞没） */
 
 /* ---- 骨架屏 ---- */
 #xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }
@@ -2252,13 +2250,24 @@
       }
     }
     if (!target) {
-      toast("没有可展开的回复", "info");
-      renderCommentsInto();
-      return;
+      // 精准定位失败（结构变体/分页后错位）时的兜底：点击所有未展开按钮，一次性补全
+      const all = [...doc.querySelectorAll(".comments-container .show-more, .comments-container .reply-more")];
+      if (!all.length) {
+        toast("没有可展开的回复", "info");
+        renderCommentsInto();
+        return;
+      }
+      log("精准展开失败，兜底展开全部（", all.length, "处）");
+      for (const btn of all) {
+        try {
+          btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        } catch (e) { /* 忽略 */ }
+      }
+    } else {
+      try {
+        target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      } catch (e) { /* 忽略 */ }
     }
-    try {
-      target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    } catch (e) { /* 忽略 */ }
     await sleep(900);
     if (!state.activeNote || state.activeNote.noteId !== note.noteId) return; // 已切换笔记，丢弃
     const parsed = parseComments(doc);
