@@ -363,6 +363,11 @@
 #xhs-wx-root .wx-composer-inner,
 #xhs-wx-root .wx-search input { transition: background-color .25s ease, color .25s ease, border-color .25s ease; }
 
+/* 千评热帖滚动优化（v0.3.0 曾因吞楼中楼移除，此次只作用于气泡内容层：
+   楼中楼在气泡内部随父层渲染不受影响； contain-intrinsic-size 给出估算尺寸避免滚动条跳动。
+   若再次出现内容缺失可删除此条 */
+#xhs-wx-root .wx-detail-body .wx-msg-body { content-visibility: auto; contain-intrinsic-size: auto 120px; }
+
 /* ---- 骨架屏 ---- */
 #xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }
 #xhs-wx-root .wx-sk-avatar {

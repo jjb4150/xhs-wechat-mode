@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.5.1
+// @version      0.6.0
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -481,6 +481,11 @@
 #xhs-wx-root .wx-composer-inner,
 #xhs-wx-root .wx-search input { transition: background-color .25s ease, color .25s ease, border-color .25s ease; }
 
+/* 千评热帖滚动优化（v0.3.0 曾因吞楼中楼移除，此次只作用于气泡内容层：
+   楼中楼在气泡内部随父层渲染不受影响； contain-intrinsic-size 给出估算尺寸避免滚动条跳动。
+   若再次出现内容缺失可删除此条 */
+#xhs-wx-root .wx-detail-body .wx-msg-body { content-visibility: auto; contain-intrinsic-size: auto 120px; }
+
 /* ---- 骨架屏 ---- */
 #xhs-wx-root .wx-skeleton-msg { display: flex; gap: 10px; margin-bottom: 18px; }
 #xhs-wx-root .wx-sk-avatar {
@@ -551,10 +556,24 @@
     }
   }
 
+  // View Transitions 渐进增强封装：支持则做平滑过渡，不支持则直接执行回调（零风险降级）
+  function withViewTransition(updateFn) {
+    if (document.hidden) return updateFn(); // 后台标签页不做过渡（省资源）
+    if (typeof document.startViewTransition === "function") {
+      try {
+        return document.startViewTransition(updateFn);
+      } catch (e) {
+        return updateFn();
+      }
+    }
+    return updateFn();
+  }
+
   function toggleDark() {
     const next = !isDark();
     storeSet(STORE_KEYS.dark, next);
-    applyDark(next);
+    // 主题切换：浏览器对整块 UI 做 cross-fade 过渡（CSS transition 只覆盖部分属性）
+    withViewTransition(() => applyDark(next));
   }
 
   /* 详情页字号缩放（仅作用于右栏详情区，持久化） */
@@ -928,35 +947,44 @@
 
   function scanFeed(force) {
     const items = document.querySelectorAll(".note-item");
-    const added = [];
+    const fresh = [];
     for (const item of items) {
       if (!force && scannedItems.has(item)) continue;
       scannedItems.add(item);
+      fresh.push(item);
+    }
+    if (!fresh.length) {
+      if (force && state.navTab === "chat") renderList();
+      return 0;
+    }
+    // 解析分片：一次解析几十张卡片可能超出一帧，按 8ms 切片让出主线程，完成后统一追加
+    const added = [];
+    runChunked(fresh, (item) => {
       const note = parseNoteItem(item);
-      if (!note || !note.noteId) continue;
+      if (!note || !note.noteId) return;
       if (!state.notesIndex.has(note.noteId)) {
         state.notesIndex.set(note.noteId, note);
         state.notes.push(note);
         added.push(note);
       } else if (force) {
         // 刷新时更新已有条目的最新数据
-        const old = state.notesIndex.get(note.noteId);
-        Object.assign(old, note);
+        Object.assign(state.notesIndex.get(note.noteId), note);
       }
-    }
-    if (added.length > 0) {
-      log("feed 扫描：新增", added.length, "条，总计", state.notes.length);
-      if (state.navTab === "chat") {
-        if (state.keyword) {
-          renderList(); // 搜索态下全量重建
-        } else {
-          appendListItems(added); // 常规增量追加，避免闪烁
+    }).then(() => {
+      if (added.length > 0) {
+        log("feed 扫描：新增", added.length, "条，总计", state.notes.length);
+        if (state.navTab === "chat") {
+          if (state.keyword) {
+            renderList(); // 搜索态下全量重建
+          } else {
+            appendListItems(added); // 常规增量追加，避免闪烁
+          }
         }
+      } else if (force) {
+        if (state.navTab === "chat") renderList();
       }
-    } else if (force) {
-      if (state.navTab === "chat") renderList();
-    }
-    return added.length;
+    });
+    return fresh.length;
   }
 
   function parseNoteItem(item) {
@@ -1573,7 +1601,8 @@
     // 若已切换笔记则放弃渲染
     if (!state.activeNote || state.activeNote.noteId !== note.noteId) return;
     state.activeDetail = { ...(detail || {}), comments: undefined, commentError: detail ? "" : "正文加载失败，正在从页面重试…" };
-    renderDetailShell();
+    // 正文从骨架到内容：View Transition 平滑 morph（不支持的浏览器直接替换）
+    withViewTransition(() => renderDetailShell());
 
     // iframe：评论 + 互动操作载体 + 正文兜底
     try {
@@ -2319,6 +2348,33 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  // 让出主线程（2025 Baseline 的 scheduler.yield，带 fallback 链）。
+  // 用于把长任务（feed 扫描/评论解析）切片，避免阻塞交互帧
+  const yieldToMain =
+    typeof scheduler !== "undefined" && typeof scheduler.yield === "function"
+      ? () => scheduler.yield()
+      : (cb) =>
+          new Promise((resolve) => {
+            if (typeof requestIdleCallback === "function") {
+              requestIdleCallback(() => resolve(), { timeout: 200 });
+            } else {
+              setTimeout(resolve, 0);
+            }
+            void cb;
+          });
+
+  // 分片执行：每 processing 毫秒让出主线程一次
+  async function runChunked(items, fn, { chunkMs = 8 } = {}) {
+    let batchStart = performance.now();
+    for (let i = 0; i < items.length; i++) {
+      fn(items[i], i);
+      if (performance.now() - batchStart > chunkMs && i < items.length - 1) {
+        await yieldToMain();
+        batchStart = performance.now();
+      }
+    }
+  }
+
   /* ============================== 图片查看器 ============================== */
 
   let viewerState = { urls: [], index: 0, el: null, scale: 1, tx: 0, ty: 0 };
@@ -2368,6 +2424,10 @@
     const rootEl = ensureRoot();
     const viewer = document.createElement("div");
     viewer.className = "wx-viewer";
+    // Popover API（2025 Baseline）：原生 top-layer、light-dismiss（点外部关闭）、Esc 关闭
+    // 不支持的浏览器自动退化为普通 fixed 定位 + 手动关闭逻辑
+    const supportsPopover = typeof viewer.showPopover === "function" && typeof HTMLElement !== "undefined" && "popover" in HTMLElement.prototype;
+    if (supportsPopover) viewer.popover = "auto";
     viewer.innerHTML = `
       <span class="wx-viewer-close" title="关闭 (Esc)">×</span>
       ${index > 0 ? '<span class="wx-viewer-arrow left" title="上一张">‹</span>' : ""}
@@ -2375,8 +2435,14 @@
       <img alt=""/>
       <div class="wx-viewer-index"></div>
     `;
-    rootEl.appendChild(viewer);
-    viewerState = { urls, index, el: viewer, scale: 1, tx: 0, ty: 0 };
+    // 查看器打开：top-layer 过渡淡入（不支持的浏览器直接显示）
+    withViewTransition(() => rootEl.appendChild(viewer));
+    if (supportsPopover) {
+      try {
+        viewer.showPopover();
+      } catch (e) { /* 已在顶层或被拦截则忽略 */ }
+    }
+    viewerState = { urls, index, el: viewer, scale: 1, tx: 0, ty: 0, supportsPopover };
 
     const img = viewer.querySelector("img");
     const resetViewerTransform = () => {
@@ -2420,12 +2486,19 @@
     viewer.addEventListener("click", (e) => {
       if (e.target === viewer || e.target.classList.contains("wx-viewer-close")) closeImageViewer();
     });
+    // Popover 的 light-dismiss 关闭时（Esc/点外部），同步清理状态
+    if (supportsPopover) {
+      viewer.addEventListener("beforetoggle", (e) => {
+        if (e.newState === "closed") closeImageViewer();
+      });
+    }
     const left = viewer.querySelector(".wx-viewer-arrow.left");
     const right = viewer.querySelector(".wx-viewer-arrow.right");
     if (left) left.addEventListener("click", () => stepViewer(-1));
     if (right) right.addEventListener("click", () => stepViewer(1));
     showViewerImage(index);
-    document.addEventListener("keydown", viewerKeyHandler);
+    // Popover 自带 Esc 关闭，仅在无 Popover 支持时手动监听键盘
+    if (!supportsPopover) document.addEventListener("keydown", viewerKeyHandler);
   }
 
   function viewerKeyHandler(e) {
@@ -2447,10 +2520,14 @@
 
   function closeImageViewer() {
     if (viewerState.el) {
-      viewerState.el.remove();
+      const el = viewerState.el;
       viewerState.el = null;
+      document.removeEventListener("keydown", viewerKeyHandler);
+      try {
+        if (el.matches(":popover-open")) el.hidePopover();
+      } catch (e) { /* 忽略 */ }
+      el.remove();
     }
-    document.removeEventListener("keydown", viewerKeyHandler);
   }
 
   /* ============================== 设置面板 ============================== */
