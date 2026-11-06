@@ -81,6 +81,42 @@ node scripts/release.mjs 0.7.1 "本次改了什么"
 
 ### 自动同步 Greasyfork
 
+有两种方式，**推荐 Webhook**（无需 token、无需出网）：
+
+#### 方式一：Greasyfork Webhook（推荐）
+
+Greasyfork 主动来 GitHub 拉代码，本机/CI 都不需要访问 Greasyfork。
+
+1. 在 Greasyfork 脚本「管理」页设置**同步源**为 GitHub raw 链接：
+   ```
+   https://raw.githubusercontent.com/jjb4150/xhs-wechat-mode/master/xhs-wechat-mode.user.js
+   ```
+   （或在「导入新脚本」时填写此链接，同步类型选「自动」）
+2. GitHub 仓库 → Settings → Webhooks → Add webhook：
+
+   | 字段         | 值                                                                  |
+   | ------------ | ------------------------------------------------------------------- |
+   | Payload URL  | `https://api.greasyfork.org/zh-CN/users/1635640-jin-bill/webhook`   |
+   | Content type | `application/json`                                                  |
+   | Secret       | 留空                                                                |
+   | 触发事件     | `Let me select individual events` → 勾选 **Pushes** 和 **Releases** |
+   | Active       | 勾选                                                                |
+
+完成后，每次 push/tag 推送，Greasyfork 会自动拉取最新代码。**不需要任何 secret。**
+
+#### 方式二：GitHub Actions 主动推送（备选）
+
+如果不用 Webhook，也可以让 Actions 调 Greasyfork API 主动上传。在仓库
+`Settings → Secrets and variables → Actions` 添加：
+
+| Secret                 | 值                                                     |
+| ---------------------- | ------------------------------------------------------ |
+| `GREASYFORK_SCRIPT_ID` | `592020`                                               |
+| `GREASYFORK_TOKEN`     | Greasyfork → 头像 → 用户 → 账号 → 页面底部「API 密钥」 |
+
+配置后每次打 tag 都会自动同步；也可在 Actions 页面手动触发（支持 dry-run）。
+未配置时该 workflow 会友好跳过，不会报错。
+
 无需手动两边上传。在仓库 `Settings → Secrets and variables → Actions` 添加两个 secret：
 
 | Secret                 | 值                                                     |
