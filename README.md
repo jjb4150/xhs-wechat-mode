@@ -49,8 +49,9 @@
 
 ```
 xhs-wechat-mode.user.js   # 主脚本（单文件、零依赖、无构建）
+scripts/release.mjs       # 发版脚本：改版本→校验→提交→打 tag→推送
 demo.html / demo.css      # UI 静态预览页（python -m http.server 后浏览器打开）
-.prettierrc.json          # 代码风格配置
+.github/workflows/        # CI 校验 + 自动发布 Release + 同步 Greasyfork
 CHANGELOG.md              # 版本变更记录
 ```
 
@@ -61,6 +62,33 @@ CHANGELOG.md              # 版本变更记录
 ```bash
 npx prettier@3 --no-config --print-width 110 --check xhs-wechat-mode.user.js
 ```
+
+### 发版流程
+
+只需一条命令：
+
+```bash
+node scripts/release.mjs 0.7.1 "本次改了什么"
+```
+
+它会自动完成版本号更新、语法与格式校验、提交、打 tag、推送。推送 tag 后 GitHub Actions 会：
+
+1. 跑 CI 校验（语法 + 元数据 + 版本与 CHANGELOG 一致性 + 格式）
+2. 从 `CHANGELOG.md` 提取该版本说明，创建 GitHub Release 并附上脚本文件
+3. 把脚本同步到 Greasyfork（需配置 secrets，见下）
+
+**发版前记得先在 `CHANGELOG.md` 顶部补该版本条目**，否则发版脚本会拒绝执行。
+
+### 自动同步 Greasyfork
+
+无需手动两边上传。在仓库 `Settings → Secrets and variables → Actions` 添加两个 secret：
+
+| Secret | 值 |
+|---|---|
+| `GREASYFORK_SCRIPT_ID` | `592020`（你脚本 URL 里的数字） |
+| `GREASYFORK_TOKEN` | Greasyfork → 头像 → 用户 → 账号 → 页面底部「API 密钥」 |
+
+配置好后，每次打 tag 推送都会自动同步。也可在 Actions 页面手动触发 `Sync to Greasyfork`（支持 dry-run）。
 
 ## 许可
 

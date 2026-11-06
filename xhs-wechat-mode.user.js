@@ -13,6 +13,10 @@
 // @grant        GM_listValues
 // @grant        GM_registerMenuCommand
 // @noframes
+// @homepageURL  https://github.com/jjb4150/xhs-wechat-mode
+// @supportURL   https://github.com/jjb4150/xhs-wechat-mode/issues
+// @downloadURL  https://update.greasyfork.org/scripts/592020/%E5%B0%8F%E7%BA%A2%E4%B9%A6%E5%BE%AE%E4%BF%A1%E6%A8%A1%E5%BC%8F.user.js
+// @updateURL    https://update.greasyfork.org/scripts/592020/%E5%B0%8F%E7%BA%A2%E4%B9%A6%E5%BE%AE%E4%BF%A1%E6%A8%A1%E5%BC%8F.meta.js
 // ==/UserScript==
 
 /*

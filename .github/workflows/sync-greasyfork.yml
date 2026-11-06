@@ -1,0 +1,122 @@
+name: Sync to Greasyfork
+
+# 打 tag（v*）推送后，自动把脚本同步到 Greasyfork。
+# 需要先在仓库 Settings → Secrets and variables → Actions 里配置：
+#   GREASYFORK_SCRIPT_ID  —— Greasyfork 脚本 ID（URL 里的数字，你的脚本是 592020）
+#   GREASYFORK_TOKEN      —— Greasyfork 网站 API 密钥（见下方获取步骤）
+#
+# 获取 Greasyfork API 密钥：
+#   登录 Greasyfork → 头像下拉 → 用户 → 账号 → 最下方 "API 密钥"
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只校验不提交"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本号
+        id: meta
+        run: |
+          ver=$(grep '^// @version' xhs-wechat-mode.user.js | awk '{print $3}')
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "当前脚本版本：$ver"
+
+      - name: 校验 secrets 已配置
+        run: |
+          if [ -z "${{ secrets.GREASYFORK_TOKEN }}" ]; then
+            echo "::error::未配置 GREASYFORK_TOKEN secret"
+            exit 1
+          fi
+          if [ -z "${{ secrets.GREASYFORK_SCRIPT_ID }}" ]; then
+            echo "::error::未配置 GREASYFORK_SCRIPT_ID secret"
+            exit 1
+          fi
+
+      - name: 从 CHANGELOG 提取本次版本说明
+        id: notes
+        run: |
+          ver="${{ steps.meta.outputs.version }}"
+          awk -v v="$ver" '
+            $0 ~ "^## \\["v"\\]" {flag=1; next}
+            flag && /^## \[/ {exit}
+            flag {print}
+          ' CHANGELOG.md > sync-notes.txt
+          {
+            echo "notes<<__EOF__"
+            cat sync-notes.txt
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 推送到 Greasyfork
+        if: ${{ !inputs.dry_run }}
+        env:
+          GF_TOKEN: ${{ secrets.GREASYFORK_TOKEN }}
+          GF_SCRIPT_ID: ${{ secrets.GREASYFORK_SCRIPT_ID }}
+          SYNC_NOTES: ${{ steps.notes.outputs.notes }}
+        run: |
+          set -euo pipefail
+          # 组装 multipart 请求（文件 + 附加说明），用 curl 调 Greasyfork 更新接口
+          python3 - <<'PY'
+          import json, os, pathlib, sys, urllib.request, uuid
+
+          token = os.environ["GF_TOKEN"]
+          script_id = os.environ["GF_SCRIPT_ID"]
+          code = pathlib.Path("xhs-wechat-mode.user.js").read_bytes()
+          notes = os.environ.get("SYNC_NOTES", "").strip()
+
+          boundary = "----gf" + uuid.uuid4().hex
+          parts = []
+
+          def field(name, value):
+              parts.append(
+                  f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+              )
+
+          def filefield(name, filename, content):
+              parts.append(
+                  (
+                      f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
+                      f'filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+                  ).encode()
+                  + content
+                  + b"\r\n"
+              )
+
+          field("api_key", token)
+          filefield("script", "script.user.js", code)
+          if notes:
+              field("additional_info", notes)
+
+          body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+
+          req = urllib.request.Request(
+              f"https://greasyfork.org/api/scripts/{script_id}/update",
+              data=body,
+              method="POST",
+              headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  print("HTTP", resp.status)
+                  print(resp.read().decode()[:800])
+          except urllib.error.HTTPError as e:
+              print("HTTP", e.code, file=sys.stderr)
+              print(e.read().decode()[:2000], file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: 完成
+        run: echo "已同步版本 ${{ steps.meta.outputs.version }} 到 Greasyfork（脚本 ID ${{ secrets.GREASYFORK_SCRIPT_ID }}）"

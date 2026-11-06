@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: 语法与格式校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: JavaScript 语法检查
+        run: node --check xhs-wechat-mode.user.js
+
+      - name: 校验 UserScript 元数据
+        run: |
+          set -e
+          f=xhs-wechat-mode.user.js
+          for key in name namespace version description match license; do
+            grep -q "^// @$key" "$f" || { echo "缺少元数据 @$key"; exit 1; }
+          done
+          head -1 "$f" | grep -q "==UserScript==" || { echo "首行必须是 ==UserScript=="; exit 1; }
+          echo "元数据完整：$(grep '^// @version' $f)"
+
+      - name: 版本号与 CHANGELOG 一致性
+        run: |
+          set -e
+          ver=$(grep '^// @version' xhs-wechat-mode.user.js | awk '{print $3}')
+          echo "脚本版本: $ver"
+          grep -q "## \[$ver\]" CHANGELOG.md || { echo "CHANGELOG.md 缺少 $ver 的条目"; exit 1; }
+          echo "CHANGELOG 已包含 $ver"
+
+      - name: Prettier 格式检查
+        run: |
+          npx --yes prettier@3 --no-config --print-width 110 \
+            --check xhs-wechat-mode.user.js README.md CHANGELOG.md
+
+  release:
+    name: 发布 Release
+    needs: validate
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 从 CHANGELOG 提取当前版本说明
+        id: notes
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v v="$ver" '
+            $0 ~ "^## \\["v"\\]" {flag=1; next}
+            flag && /^## \[/ {exit}
+            flag {print}
+          ' CHANGELOG.md > release-notes.md
+          cat release-notes.md
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" xhs-wechat-mode.user.js \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md
