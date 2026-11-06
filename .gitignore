@@ -1,0 +1,9 @@
+# 依赖与构建产物（当前项目零依赖，预留）
+node_modules/
+dist/
+
+# 本地调试
+server.log
+*.local.user.js
+.DS_Store
+Thumbs.db

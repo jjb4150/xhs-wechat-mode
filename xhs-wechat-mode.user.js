@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书微信模式
 // @namespace    xhs-wechat-mode
-// @version      0.6.4
+// @version      0.7.0
 // @description  小红书微信式左右分栏界面：笔记会话列表、气泡阅读笔记与评论、发送评论、点赞、收藏。
 // @author       junbiaojin
 // @license      MIT
@@ -372,6 +372,8 @@
   display: inline-flex; align-items: center; gap: 4px; margin-top: 8px;
   padding: 4px 10px; border-radius: 14px; background: var(--interact-bg);
   font-size: 12px; color: var(--text-2); user-select: none;
+  /* 滚动经过时不拦截手势，避免触控板/触摸滑动被误判成点击 */
+  touch-action: pan-y;
 }
 #xhs-wx-root .wx-msg.me .wx-interact { background: rgba(0,0,0,.06); color: rgba(0,0,0,.55); }
 #xhs-wx-root .wx-interact .act {
@@ -1894,7 +1896,9 @@
     commentsNoMore = false;
   }
 
-  // 从 iframe 文档提取互动栏数据（数字与激活状态）
+  // 从 iframe 文档提取互动栏数据（只取数字，不猜点赞状态）
+  // 实测：.like-wrapper 上常驻 like-active 类，与是否已点赞无关，不能据此判断状态。
+  // 点赞/收藏的"已选"状态一律以 SSR 数据（interactInfo.liked/collected）为准，本地点击后再翻转。
   function extractFrameState(doc) {
     try {
       const interactEl = doc.querySelector(".interact-container");
@@ -1907,15 +1911,11 @@
         return c ? c.textContent.trim() : "";
       };
       const counts = [...interactEl.querySelectorAll(".count")].map((el) => el.textContent.trim());
-      const liked = btns.like
-        ? /like-active|\bactive\b/.test(String(btns.like.className || ""))
-        : !!interactEl.querySelector(".like-active");
       return {
         interact: {
           likedCount: countOf(btns.like) || counts[0] || "",
           collectedCount: countOf(btns.collect) || counts[1] || "",
           commentCount: counts[2] || "",
-          liked,
         },
       };
     } catch (e) {
@@ -2146,6 +2146,35 @@
   // 详情区事件委托：只绑定一次（在 bindRootEvents 中调用），替代逐条 addEventListener
   function bindDetailEventsOnce(rootEl) {
     const body = rootEl.querySelector("#wx-detail-body");
+
+    // 防误点赞：触摸/触控板滚动时，浏览器可能在滚动开始时产生一次 click
+    // （scroll-induced click）。记录按下位置，位移超过阈值或期间发生滚动就判定为滚动，忽略这次点击。
+    let pressPoint = null;
+    let scrolledDuringPress = false;
+    const SCROLL_CLICK_TOLERANCE = 12; // px
+    body.addEventListener(
+      "pointerdown",
+      (e) => {
+        pressPoint = { x: e.clientX, y: e.clientY };
+        scrolledDuringPress = false;
+      },
+      { passive: true, capture: true }
+    );
+    body.addEventListener(
+      "scroll",
+      () => {
+        if (pressPoint) scrolledDuringPress = true;
+      },
+      { passive: true, capture: true }
+    );
+    const isScrollGesture = (e) => {
+      if (scrolledDuringPress) return true;
+      if (!pressPoint) return false;
+      const dx = Math.abs((e.clientX || 0) - pressPoint.x);
+      const dy = Math.abs((e.clientY || 0) - pressPoint.y);
+      return dx > SCROLL_CLICK_TOLERANCE || dy > SCROLL_CLICK_TOLERANCE;
+    };
+
     body.addEventListener("click", (e) => {
       const img = e.target.closest("img[data-viewer]");
       if (img) {
@@ -2158,6 +2187,11 @@
       }
       const act = e.target.closest("[data-interact] .act[data-act]");
       if (act) {
+        // 滚动过程中划过的点赞/收藏不算点击（用户反馈的"滚动就自动点赞"）
+        if (isScrollGesture(e)) {
+          log("忽略滚动过程中的互动点击：", act.dataset.act);
+          return;
+        }
         actInteract(act.dataset.act);
         return;
       }
