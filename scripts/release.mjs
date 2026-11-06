@@ -32,16 +32,23 @@ function die(msg) {
   process.exit(1);
 }
 
-// Windows 上 npx/git 等需要 .cmd 后缀才能被 execFileSync 直接调用
+// Windows 下 execFileSync 直接调 npx/git 会因 .cmd 解析失败（EINVAL），统一走 shell
 const IS_WIN = process.platform === "win32";
-const shellCmd = (cmd) => (IS_WIN && (cmd === "npx" || cmd === "npm") ? `${cmd}.cmd` : cmd);
 
 function run(cmd, args, opts = {}) {
-  return execFileSync(shellCmd(cmd), args, { cwd: ROOT, encoding: "utf8", stdio: "inherit", ...opts });
+  const useShell = IS_WIN && (cmd === "npx" || cmd === "npm");
+  return execFileSync(cmd, args, {
+    cwd: ROOT,
+    encoding: "utf8",
+    stdio: "inherit",
+    shell: useShell,
+    ...opts,
+  });
 }
 
 function runCapture(cmd, args) {
-  return execFileSync(shellCmd(cmd), args, { cwd: ROOT, encoding: "utf8" }).trim();
+  const useShell = IS_WIN && (cmd === "npx" || cmd === "npm");
+  return execFileSync(cmd, args, { cwd: ROOT, encoding: "utf8", shell: useShell }).trim();
 }
 
 if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
