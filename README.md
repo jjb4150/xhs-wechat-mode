@@ -45,86 +45,76 @@
 - 依赖登录态，未登录时评论等内容不完整
 - 评论区翻页依赖驱动隐藏页面滚动，热帖连续快速翻页时可能略慢
 
-## 开发
+## 常见问题
 
-```
-xhs-wechat-mode.user.js   # 主脚本（单文件、零依赖、无构建）
-scripts/release.mjs       # 发版脚本：改版本→校验→提交→打 tag→推送
-demo.html / demo.css      # UI 静态预览页（python -m http.server 后浏览器打开）
-.github/workflows/        # CI 校验 + 自动发布 Release + 同步 Greasyfork
-CHANGELOG.md              # 版本变更记录
-```
+**为什么有的评论图/表情不显示？**
+脚本按小红书当前的页面结构解析。若站点改版，可能部分内容抓不到，欢迎 [提 issue](https://github.com/jjb4150/xhs-wechat-mode/issues) 并附上控制台日志。
+
+**点赞/收藏没反应？**
+点赞收藏是通过驱动真实页面完成的。若提示"未定位到按钮"，可点右上角「原页」直接操作。
+
+**装了没反应？**
+确认已登录小红书、且当前在首页"发现" feed（其他页面不接管）。
+
+<details>
+<summary><b>开发者：项目结构与发版流程</b>（点击展开）</summary>
+
+| 文件                      | 说明                                   |
+| ------------------------- | -------------------------------------- |
+| `xhs-wechat-mode.user.js` | 主脚本，单文件、零依赖、无构建         |
+| `scripts/release.mjs`     | 发版脚本                               |
+| `demo.html` / `demo.css`  | UI 静态预览页                          |
+| `.github/workflows/`      | CI 校验、自动 Release、Greasyfork 同步 |
+| `CHANGELOG.md`            | 版本变更记录                           |
 
 调试：浏览器控制台过滤 `[小红书微信模式]` 查看运行日志。
 
-代码风格：
+代码风格检查：
 
 ```bash
 npx prettier@3 --no-config --print-width 110 --check xhs-wechat-mode.user.js
 ```
 
-### 发版流程
+### 发版
 
-只需一条命令：
+先在 `CHANGELOG.md` 顶部补该版本条目，然后：
 
 ```bash
 node scripts/release.mjs 0.7.1 "本次改了什么"
 ```
 
-它会自动完成版本号更新、语法与格式校验、提交、打 tag、推送。推送 tag 后 GitHub Actions 会：
-
-1. 跑 CI 校验（语法 + 元数据 + 版本与 CHANGELOG 一致性 + 格式）
-2. 从 `CHANGELOG.md` 提取该版本说明，创建 GitHub Release 并附上脚本文件
-3. 把脚本同步到 Greasyfork（需配置 secrets，见下）
-
-**发版前记得先在 `CHANGELOG.md` 顶部补该版本条目**，否则发版脚本会拒绝执行。
+自动完成版本号更新、语法与格式校验、提交、打 tag、推送。推送后 Actions 会跑 CI、
+从 CHANGELOG 提取说明创建 Release（附脚本文件），并同步到 Greasyfork。
 
 ### 自动同步 Greasyfork
 
-有两种方式，**推荐 Webhook**（无需 token、无需出网）：
+推荐用 **Webhook**（Greasyfork 主动来拉，本机无需访问 Greasyfork）：
 
-#### 方式一：Greasyfork Webhook（推荐）
-
-Greasyfork 主动来 GitHub 拉代码，本机/CI 都不需要访问 Greasyfork。
-
-1. 在 Greasyfork 脚本「管理」页设置**同步源**为 GitHub raw 链接：
+1. Greasyfork 脚本「管理」页把同步源设为：
    ```
    https://raw.githubusercontent.com/jjb4150/xhs-wechat-mode/master/xhs-wechat-mode.user.js
    ```
-   （或在「导入新脚本」时填写此链接，同步类型选「自动」）
 2. GitHub 仓库 → Settings → Webhooks → Add webhook：
 
-   | 字段         | 值                                                                  |
-   | ------------ | ------------------------------------------------------------------- |
-   | Payload URL  | `https://api.greasyfork.org/zh-CN/users/1635640-jin-bill/webhook`   |
-   | Content type | `application/json`                                                  |
-   | Secret       | 留空                                                                |
-   | 触发事件     | `Let me select individual events` → 勾选 **Pushes** 和 **Releases** |
-   | Active       | 勾选                                                                |
+   | 字段         | 值                                                                |
+   | ------------ | ----------------------------------------------------------------- |
+   | Payload URL  | `https://api.greasyfork.org/zh-CN/users/1635640-jin-bill/webhook` |
+   | Content type | `application/json`                                                |
+   | Secret       | 留空                                                              |
+   | 事件         | 勾选 Pushes 和 Releases                                           |
 
-完成后，每次 push/tag 推送，Greasyfork 会自动拉取最新代码。**不需要任何 secret。**
+备选：在 `Settings → Secrets and variables → Actions` 配 `GREASYFORK_SCRIPT_ID`（`592020`）
+和 `GREASYFORK_TOKEN`（Greasyfork 账号页底部），由 Actions 主动推送。未配置时该 workflow 自动跳过。
 
-#### 方式二：GitHub Actions 主动推送（备选）
+</details>
 
-如果不用 Webhook，也可以让 Actions 调 Greasyfork API 主动上传。在仓库
-`Settings → Secrets and variables → Actions` 添加：
+## 贡献
 
-| Secret                 | 值                                                     |
-| ---------------------- | ------------------------------------------------------ |
-| `GREASYFORK_SCRIPT_ID` | `592020`                                               |
-| `GREASYFORK_TOKEN`     | Greasyfork → 头像 → 用户 → 账号 → 页面底部「API 密钥」 |
+欢迎提 [Issue](https://github.com/jjb4150/xhs-wechat-mode/issues) 反馈问题或建议。提交代码前请：
 
-配置后每次打 tag 都会自动同步；也可在 Actions 页面手动触发（支持 dry-run）。
-未配置时该 workflow 会友好跳过，不会报错。
-
-无需手动两边上传。在仓库 `Settings → Secrets and variables → Actions` 添加两个 secret：
-
-| Secret                 | 值                                                     |
-| ---------------------- | ------------------------------------------------------ |
-| `GREASYFORK_SCRIPT_ID` | `592020`（你脚本 URL 里的数字）                        |
-| `GREASYFORK_TOKEN`     | Greasyfork → 头像 → 用户 → 账号 → 页面底部「API 密钥」 |
-
-配置好后，每次打 tag 推送都会自动同步。也可在 Actions 页面手动触发 `Sync to Greasyfork`（支持 dry-run）。
+- 跑 `node --check xhs-wechat-mode.user.js` 与 Prettier 格式检查
+- 在 `CHANGELOG.md` 补充本次改动
+- 说明实测环境（浏览器、脚本管理器版本）
 
 ## 许可
 
