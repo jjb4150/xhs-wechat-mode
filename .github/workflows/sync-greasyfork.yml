@@ -34,18 +34,18 @@ jobs:
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "当前脚本版本：$ver"
 
-      - name: 校验 secrets 已配置
+      - name: 检查 secrets 是否已配置
+        id: check
         run: |
-          if [ -z "${{ secrets.GREASYFORK_TOKEN }}" ]; then
-            echo "::error::未配置 GREASYFORK_TOKEN secret"
-            exit 1
-          fi
-          if [ -z "${{ secrets.GREASYFORK_SCRIPT_ID }}" ]; then
-            echo "::error::未配置 GREASYFORK_SCRIPT_ID secret"
-            exit 1
+          if [ -z "${{ secrets.GREASYFORK_TOKEN }}" ] || [ -z "${{ secrets.GREASYFORK_SCRIPT_ID }}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::未配置 GREASYFORK_TOKEN / GREASYFORK_SCRIPT_ID，跳过同步。配置方法见 README「自动同步 Greasyfork」。"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 从 CHANGELOG 提取本次版本说明
+        if: steps.check.outputs.configured == 'true'
         id: notes
         run: |
           ver="${{ steps.meta.outputs.version }}"
@@ -61,7 +61,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: 推送到 Greasyfork
-        if: ${{ !inputs.dry_run }}
+        if: steps.check.outputs.configured == 'true' && !inputs.dry_run
         env:
           GF_TOKEN: ${{ secrets.GREASYFORK_TOKEN }}
           GF_SCRIPT_ID: ${{ secrets.GREASYFORK_SCRIPT_ID }}
@@ -119,4 +119,5 @@ jobs:
           PY
 
       - name: 完成
+        if: steps.check.outputs.configured == 'true'
         run: echo "已同步版本 ${{ steps.meta.outputs.version }} 到 Greasyfork（脚本 ID ${{ secrets.GREASYFORK_SCRIPT_ID }}）"

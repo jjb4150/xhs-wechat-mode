@@ -29,12 +29,12 @@
 
 小红书接口带请求签名，直接调 API 需要逆向并承担风控风险。本脚本采用**零签名、零伪造请求**的路线：
 
-| 数据 | 获取方式 |
-|---|---|
-| 笔记流 | 读取页面自身渲染的 feed DOM（MutationObserver 增量扫描 + 分片解析） |
-| 笔记正文 | `fetch` 笔记页 HTML，解析内嵌 `__INITIAL_STATE__` |
-| 评论 | 隐藏 iframe 加载真实笔记页，读取其评论区 DOM（与浏览器缓存/登录态天然一致） |
-| 点赞 / 收藏 / 发评论 | 驱动隐藏 iframe 中真实页面控件完成，不构造任何请求 |
+| 数据                 | 获取方式                                                                    |
+| -------------------- | --------------------------------------------------------------------------- |
+| 笔记流               | 读取页面自身渲染的 feed DOM（MutationObserver 增量扫描 + 分片解析）         |
+| 笔记正文             | `fetch` 笔记页 HTML，解析内嵌 `__INITIAL_STATE__`                           |
+| 评论                 | 隐藏 iframe 加载真实笔记页，读取其评论区 DOM（与浏览器缓存/登录态天然一致） |
+| 点赞 / 收藏 / 发评论 | 驱动隐藏 iframe 中真实页面控件完成，不构造任何请求                          |
 
 所有设置仅保存在本地 Tampermonkey 存储，无任何数据上报。
 
@@ -83,10 +83,10 @@ node scripts/release.mjs 0.7.1 "本次改了什么"
 
 无需手动两边上传。在仓库 `Settings → Secrets and variables → Actions` 添加两个 secret：
 
-| Secret | 值 |
-|---|---|
-| `GREASYFORK_SCRIPT_ID` | `592020`（你脚本 URL 里的数字） |
-| `GREASYFORK_TOKEN` | Greasyfork → 头像 → 用户 → 账号 → 页面底部「API 密钥」 |
+| Secret                 | 值                                                     |
+| ---------------------- | ------------------------------------------------------ |
+| `GREASYFORK_SCRIPT_ID` | `592020`（你脚本 URL 里的数字）                        |
+| `GREASYFORK_TOKEN`     | Greasyfork → 头像 → 用户 → 账号 → 页面底部「API 密钥」 |
 
 配置好后，每次打 tag 推送都会自动同步。也可在 Actions 页面手动触发 `Sync to Greasyfork`（支持 dry-run）。
 
